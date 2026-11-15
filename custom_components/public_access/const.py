@@ -7,7 +7,13 @@ from typing import Final
 DOMAIN: Final = "public_access"
 
 CONF_DASHBOARD: Final = "dashboard"
-CONF_VIEW_PATH: Final = "view_path"
+CONF_VIEW_PATH: Final = "view_path"  # one view; versions before 0.6
+CONF_VIEWS: Final = "views"  # the views shown as tabs
+CONF_SUPPORT_VIEWS: Final = "support_views"  # sent but hidden from the tab bar
+CONF_SHOW_TABS: Final = "show_tabs"
+CONF_TITLE: Final = "title"
+CONF_CAMERA_STREAMS: Final = "camera_streams"
+CONF_FRIGATE_CAMERAS: Final = "frigate_cameras"
 CONF_PUBLIC_PATH: Final = "public_path"
 CONF_ENABLED: Final = "enabled"
 CONF_NOINDEX: Final = "noindex"
@@ -22,6 +28,9 @@ DEFAULT_NOINDEX: Final = True
 
 # Requests per minute per client IP for the public endpoints.
 RATE_LIMIT_PER_MINUTE: Final = 60
+# Pictures and clips fetched by cards (a camera wall, a gallery of Frigate
+# thumbnails) come many to a page, so they are counted on their own.
+MEDIA_RATE_LIMIT_PER_MINUTE: Final = 600
 
 # Paths the public route must never claim. A registered aiohttp view outranks the
 # frontend catch-all resource (verified on HA 2026.9.3), so claiming one of these

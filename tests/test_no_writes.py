@@ -76,13 +76,30 @@ def test_public_view_requires_no_auth_by_design_and_says_so():
     assert "requires_auth = False" in text
 
 
-def test_the_only_visitor_parameters_are_the_history_ones_and_they_are_filtered():
-    """The page itself reads nothing from the query string. The one endpoint
-    that does (history) cuts the entity list down to the published view."""
+def test_the_only_visitor_parameters_are_checked_against_what_is_published():
+    """The page itself reads nothing from the query string. Two endpoints do:
+    history, which cuts the entity list down to the published views, and the
+    media endpoint, which serves a path (query included) only if the policy
+    allows it and otherwise answers that it does not exist."""
     text = (PACKAGE / "view.py").read_text(encoding="utf-8")
-    assert text.count("request.query") == 1 and "history.parse_query" in text
+    assert text.count("request.query") == 3
+    assert "history.parse_query" in text and text.count("dict(request.query)") == 1
+    assert text.count("request.query_string") == 2
+    media = text[text.index("async def _serve_media"):text.index("async def _serve_page")]
+    assert media.index("access.path_allowed(path)") < media.index("async_sign_path(")
     history_module = (PACKAGE / "history.py").read_text(encoding="utf-8")
     assert "[e for e in wanted if e in allowed]" in history_module
+
+
+def test_nothing_is_signed_without_asking_the_policy():
+    """A signed path is a key. The mirror signs for a visitor in exactly two
+    places, and both ask policy.Access.path_allowed first."""
+    mirror = (PACKAGE / "mirror.py").read_text(encoding="utf-8")
+    branch = mirror[mirror.index('elif kind == "auth/sign_path":'):]
+    assert branch.index("self._access.path_allowed(") < branch.index("self._refuse(")
+    for name in ("view.py", "mirror.py", "coordinator.py", "data.py", "mirror_core.py"):
+        text = (PACKAGE / name).read_text(encoding="utf-8")
+        assert text.count("async_sign_path(") == (1 if name == "view.py" else 0), name
 
 
 def test_the_mirror_filters_what_home_assistant_answers():

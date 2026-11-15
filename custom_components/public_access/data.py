@@ -140,3 +140,58 @@ def energy_statistic_ids(prefs: dict[str, Any] | None) -> set[str]:
             add(device.get("stat_consumption"))
     return ids
 
+
+
+def device_ids(hass: HomeAssistant, entity_ids: set[str]) -> set[str]:
+    """The devices behind these entities, from the entity registry."""
+    try:
+        from homeassistant.helpers import entity_registry as er
+
+        registry = er.async_get(hass)
+        found: set[str] = set()
+        for entity_id in entity_ids:
+            entry = registry.async_get(entity_id)
+            if entry is not None and entry.device_id:
+                found.add(entry.device_id)
+        return found
+    except Exception:  # noqa: BLE001 - never block a visit on introspection
+        _LOGGER.debug("Could not read the entity registry", exc_info=True)
+        return set()
+
+
+def frigate_instances(hass: HomeAssistant) -> dict[str, set[str]]:
+    """Every Frigate instance the Frigate integration knows, with its cameras.
+
+    Keyed by the instance id cards use (Frigate's MQTT client id). Read from
+    the Frigate integration's own data; empty when it is not installed.
+    """
+    out: dict[str, set[str]] = {}
+    try:
+        for stored in (hass.data.get("frigate") or {}).values():
+            config = stored.get("config") if isinstance(stored, dict) else None
+            if not isinstance(config, dict):
+                continue
+            instance = (config.get("mqtt") or {}).get("client_id") or "frigate"
+            cameras = config.get("cameras") or {}
+            out.setdefault(str(instance), set()).update(str(name) for name in cameras)
+    except Exception:  # noqa: BLE001 - another integration's data: assume nothing
+        _LOGGER.debug("Could not read the Frigate integration's data", exc_info=True)
+        return {}
+    return out
+
+
+def frigate_cameras_of(hass: HomeAssistant, entity_ids: set[str]) -> set[str]:
+    """Frigate camera names behind these camera entities.
+
+    A Frigate camera entity says which camera it is in its ``camera_name``
+    attribute.
+    """
+    names: set[str] = set()
+    for entity_id in entity_ids:
+        if not entity_id.startswith("camera."):
+            continue
+        state = hass.states.get(entity_id)
+        name = state.attributes.get("camera_name") if state is not None else None
+        if isinstance(name, str) and name:
+            names.add(name)
+    return names

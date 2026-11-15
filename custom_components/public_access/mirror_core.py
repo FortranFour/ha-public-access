@@ -10,8 +10,9 @@ reaches.
 What lives here is what makes Home Assistant's own frontend *work* behind the
 glass, and what has to follow the frontend release after release:
 
-* the page scripts: a fake token, the websocket steered to the public
-  endpoint, the header and sidebar hidden, editing dialogs blocked;
+* the page scripts: a fake token, the websocket and REST requests steered to
+  the public endpoint, the sidebar hidden, the header hidden or trimmed to its
+  tab bar, editing dialogs blocked, navigation kept inside the dashboard;
 * request rewrites: the dashboard is asked for by its public name and fetched
   under its real one;
 * answer rewrites: the "lovelace" alias panel the frontend looks up while
@@ -76,38 +77,73 @@ def head_script(public_path: str) -> str:
         "if(u.indexOf('/auth/token')>=0){return Promise.resolve(new Response("
         "JSON.stringify({access_token:'public',expires_in:1800,token_type:'Bearer'}),"
         "{status:200,headers:{'Content-Type':'application/json'}}));}"
-        # History over REST (ApexCharts and friends): to the public endpoint,
-        # which answers only for the published view's entities.
-        "try{var h=new URL(u,origin);if(h.origin===origin&&h.pathname.indexOf('/api/history/period')===0){"
+        # Anything a card fetches from Home Assistant's REST API (history for
+        # ApexCharts, a camera picture, a Frigate thumbnail, a calendar) goes to
+        # the public endpoint instead, which answers only for what is
+        # published. Sent to Home Assistant itself it would arrive with the
+        # fake token and count as a failed login. A link that already carries
+        # its own permission (token= or authSig=) is left alone.
+        "try{var h=new URL(u,origin);if(h.origin===origin&&h.pathname.indexOf('/api/')===0"
+        "&&!h.searchParams.has('token')&&!h.searchParams.has('authSig')){"
         f"h.pathname={json.dumps('/' + public_path)}+h.pathname;"
         "var a=Array.prototype.slice.call(arguments);a[0]=typeof i==='string'?h.toString():new Request(h.toString(),i);"
         "return F.apply(this,a);}}catch(e){}"
         "return F.apply(this,arguments);};"
+        # Only the published dashboard exists here. A card that navigates
+        # anywhere else on this Home Assistant (settings, another dashboard)
+        # would land on an error page, so such a move is simply not made.
+        f"var base={json.dumps('/' + public_path)};"
+        "function stay(u){try{if(u==null)return false;var x=new URL(u,location.href);"
+        "return x.origin===origin&&x.pathname!==base&&x.pathname.indexOf(base+'/')!==0;}catch(e){return false;}}"
+        "['pushState','replaceState'].forEach(function(n){var o=history[n];"
+        "history[n]=function(d,t,u){if(stay(u))return;return o.apply(this,arguments);};});"
         "})();</script>"
     )
 
 
 GLASS_SCRIPT = r"""
 <script>(function(){
-  // Cosmetic layer only: security is enforced server-side. Hides the header
-  // and sidebar so the page is the view and nothing else, and blocks the edit
-  // and settings dialogs from ever opening.
+  // Cosmetic layer only: security is enforced server-side. Trims Home
+  // Assistant's own chrome so the page is the dashboard and nothing else, and
+  // blocks the edit and settings dialogs from ever opening.
+  //
+  // With one published view the whole header goes. With several, the header
+  // stays as the tab bar (and the back arrow of a subview); only its menu
+  // button and its edit/search/assistant buttons go.
+  var TABS=__SHOW_HEADER__;
+  var HEADER=TABS
+    ? 'ha-menu-button,.action-items{display:none!important}'
+      +'.toolbar{padding-inline-start:var(--ha-space-2,8px)!important}'
+    : '.header,.toolbar{display:none!important}'
+      +'#view{padding-top:0!important;margin-top:0!important}';
+  var MAIN='ha-sidebar{display:none!important}';
   function deep(sel, root){root=root||document;var st=[root];while(st.length){var n=st.pop();
     var f=n.querySelector&&n.querySelector(sel);if(f)return f;
     var all=n.querySelectorAll?n.querySelectorAll('*'):[];for(var i=0;i<all.length;i++)if(all[i].shadowRoot)st.push(all[i].shadowRoot);}return null;}
-  function hide(e){if(e)e.style.setProperty('display','none','important');}
-  function apply(){
-    hide(deep('ha-sidebar'));
-    var root=deep('hui-root');var sh=root&&root.shadowRoot;
-    if(sh){hide(sh.querySelector('.header'));hide(sh.querySelector('.toolbar'));
-      var v=sh.querySelector('#view');if(v){v.style.setProperty('padding-top','0','important');v.style.setProperty('margin-top','0','important');}}
+  // A stylesheet inside the element's own shadow root: it keeps applying when
+  // the frontend redraws the header (another tab, into a subview and back).
+  function dress(host, css){var sh=host&&host.shadowRoot;if(!sh||sh.querySelector('style[data-public-access]'))return;
+    var st=document.createElement('style');st.setAttribute('data-public-access','');st.textContent=css;sh.appendChild(st);}
+  var root=null, main=null;
+  function apply(search){
+    if(!root||!root.isConnected)root=search?deep('hui-root'):null;
+    if(!main||!main.isConnected)main=search?deep('home-assistant-main'):null;
+    dress(root,HEADER);dress(main,MAIN);
   }
-  var n=0;var t=setInterval(function(){apply();if(++n>120)clearInterval(t);},250);
+  // Look hard while the page builds, then keep an inexpensive watch: the
+  // frontend makes a new dashboard root when the owner edits the dashboard.
+  var n=0;var t=setInterval(function(){apply(true);if(++n>120){clearInterval(t);
+    setInterval(function(){apply(!root||!root.isConnected||!main||!main.isConnected);},2000);}},250);
   window.addEventListener('show-dialog',function(e){var d=e.detail&&e.detail.dialogTag||'';
     if(/edit|config|settings|search|quick-bar|voice|assist/i.test(d)){e.stopImmediatePropagation();}},true);
   document.addEventListener('keydown',function(e){if(e.key==='e'||e.key==='c'||e.key==='a'||e.key==='m')e.stopImmediatePropagation();},true);
 })();</script>
 """
+
+
+def glass_script(show_header: bool = False) -> str:
+    """The cosmetic layer, with or without the tab bar."""
+    return GLASS_SCRIPT.replace("__SHOW_HEADER__", "true" if show_header else "false")
 
 
 def loading_style(color: str | None) -> str:
@@ -134,14 +170,20 @@ def loading_style(color: str | None) -> str:
     return f"<style>{css}</style>"
 
 
-def assemble_page(index_html: str, public_path: str, loading_background: str | None = None) -> str:
+def assemble_page(
+    index_html: str,
+    public_path: str,
+    loading_background: str | None = None,
+    show_header: bool = False,
+) -> str:
     """Home Assistant's own index page with the scripts put in place."""
     early = head_script(public_path) + loading_style(loading_background)
+    glass = glass_script(show_header)
     head = index_html.find("<head>")
     if head < 0:
-        return early + index_html + GLASS_SCRIPT
+        return early + index_html + glass
     insert = head + len("<head>")
-    return index_html[:insert] + early + index_html[insert:] + GLASS_SCRIPT
+    return index_html[:insert] + early + index_html[insert:] + glass
 
 
 # -- a visitor's connection --------------------------------------------------------
@@ -174,6 +216,20 @@ class Session:
             self._silent.discard(msg.get("subscription"))
             return True, None
         return False, None
+
+    def dashboards(self, title: str | None = None) -> list[dict[str, Any]]:
+        """The dashboard list as a visitor's cards see it: the published
+        dashboard under its public name, and no other."""
+        return [
+            {
+                "id": self.public_path,
+                "url_path": self.public_path,
+                "title": title or "Dashboard",
+                "mode": "storage",
+                "show_in_sidebar": False,
+                "require_admin": False,
+            }
+        ]
 
     def outbound(self, kind: str, message: dict[str, Any]) -> dict[str, Any]:
         """Adapt an answer the integration has already filtered."""

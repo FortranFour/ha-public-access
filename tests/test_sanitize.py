@@ -31,3 +31,130 @@ def test_the_owner_default_panel_never_reaches_the_visitor():
     assert nested["core"]["default_panel"] == "public"
     assert nested["sidebar"] == {"panelOrder": ["x"]}
     assert sanitize.pin_default_panel(None, "public") is None
+
+
+# -- several views ------------------------------------------------------------------
+
+DASHBOARD = {
+    "title": "Elm Street",
+    "button_card_templates": {"big": {"entity": "sensor.shared"}},
+    "views": [
+        {"title": "Home", "cards": [{"type": "button", "tap_action": {"navigation_path": "/dashboard-elm/solar"}}]},
+        {"title": "Solar", "path": "solar", "visible": [{"user": "abc"}], "cards": [{"entity": "sensor.pv"}]},
+        {"title": "Sources", "path": "sources", "cards": [{"entity": "light.porch"}]},
+        {"title": "Private", "path": "private", "cards": [{"entity": "lock.safe"}]},
+    ],
+}
+
+
+def _titles(config):
+    return [(v["title"], v.get("visible", True)) for v in config["views"]]
+
+
+def test_an_entry_from_before_several_views_still_means_its_one_view():
+    assert sanitize.configured_views({"view_path": "solar"}) == ["solar"]
+    assert sanitize.configured_views({"view_path": None}) == [sanitize.FIRST_VIEW]
+    assert sanitize.configured_views({}) == [sanitize.FIRST_VIEW]
+    assert sanitize.configured_views({"views": ["solar", "costs"], "view_path": "solar"}) == ["solar", "costs"]
+    assert sanitize.configured_views({}, "support_views") == []
+
+
+def test_chosen_views_are_kept_in_dashboard_order_and_the_rest_are_not_sent():
+    out = sanitize.publish_config(DASHBOARD, published=["solar", sanitize.FIRST_VIEW])
+    assert _titles(out) == [("Home", True), ("Solar", True)]
+    assert "lock.safe" not in str(out) and "light.porch" not in str(out)
+
+
+def test_a_published_view_is_a_tab_whatever_users_it_was_limited_to():
+    """`visible` lists the owner's users; the visitor is none of them."""
+    out = sanitize.publish_config(DASHBOARD, published=["solar"])
+    assert "visible" not in out["views"][0]
+
+
+def test_a_view_the_owner_hides_from_everyone_keeps_no_tab_when_published():
+    config = {"views": [{"path": "a"}, {"path": "b", "visible": False}, {"path": "c", "visible": []}]}
+    out = sanitize.publish_config(config, published=["a", "b", "c"])
+    assert [(v["path"], v.get("visible", True)) for v in out["views"]] == [("a", True), ("b", False), ("c", False)]
+
+
+def test_a_supporting_view_is_sent_but_hidden_from_the_tab_bar():
+    out = sanitize.publish_config(DASHBOARD, published=["solar"], support=["sources", "solar"])
+    assert _titles(out) == [("Solar", True), ("Sources", False)]
+
+
+def test_a_view_without_an_address_is_only_ever_the_first_view():
+    config = {"views": [{"title": "A"}, {"title": "B"}, {"title": "C", "path": "c"}]}
+    out = sanitize.publish_config(config, published=[sanitize.FIRST_VIEW, "c", "1", "None"])
+    assert _titles(out) == [("A", True), ("C", True)]
+
+
+def test_the_dashboards_own_address_and_name_stay_home():
+    out = sanitize.publish_config(
+        DASHBOARD, published=[sanitize.FIRST_VIEW], dashboard="dashboard-elm", public_path="solar", title="Solar")
+    assert out["title"] == "Solar"
+    assert out["views"][0]["cards"][0]["tap_action"]["navigation_path"] == "/solar/solar"
+    assert "dashboard-elm" not in str(out) and "Elm Street" not in str(out)
+    assert DASHBOARD["title"] == "Elm Street", "the stored dashboard is not touched"
+
+
+def test_only_the_dashboard_address_is_rewritten():
+    rewrite = lambda text: sanitize.rewrite_text(text, "dashboard-elm", "pub")
+    assert rewrite("dashboard-elm") == "pub"
+    assert rewrite("/dashboard-elm") == "/pub"
+    assert rewrite("/dashboard-elm/solar?edit=1#x") == "/pub/solar?edit=1#x"
+    assert rewrite("[go](/dashboard-elm/solar)") == "[go](/pub/solar)"
+    assert rewrite("navigate('/dashboard-elm/a'); navigate(\"/dashboard-elm\")") == "navigate('/pub/a'); navigate(\"/pub\")"
+    # Not the dashboard: a file under /local, a longer name, a plain word.
+    assert rewrite("/local/dashboard-elm/plan.png") == "/local/dashboard-elm/plan.png"
+    assert rewrite("/dashboard-elm-old/solar") == "/dashboard-elm-old/solar"
+    assert rewrite("the dashboard-elm page") == "the dashboard-elm page"
+
+
+def test_entities_are_found_as_values_and_inside_templates():
+    entities, statistics, candidates = sanitize.referenced_ids({
+        "entity": "sensor.pv",
+        "stat": "energy:grid_import",
+        "label": "[[[ return states['sensor.pool_temp'].state + hass.states[\"cover.gate\"].state ]]]",
+        "content": "{{ states('sensor.outside') | float }} {{ this.config }}",
+        "call": "console.log(some.thing)",
+    })
+    assert entities == {"sensor.pv"}
+    assert statistics == {"energy:grid_import"}
+    # Candidates are checked against the entities that exist before use.
+    assert {"sensor.pool_temp", "cover.gate", "sensor.outside"} <= candidates
+    assert "console.log" not in candidates
+
+
+def test_shared_templates_at_the_top_of_the_dashboard_are_scanned_too():
+    out = sanitize.publish_config(DASHBOARD, published=["solar"])
+    entities, _, _ = sanitize.referenced_ids(out)
+    assert entities == {"sensor.pv", "sensor.shared"}
+
+
+def test_the_core_configuration_does_not_locate_the_home():
+    public = sanitize.public_core_config({
+        "latitude": 47.6, "longitude": -122.3, "elevation": 50, "radius": 100,
+        "location_name": "Elm Street", "config_dir": "/config", "internal_url": "http://192.168.1.2:8123",
+        "allowlist_external_dirs": ["/media"], "future_secret_dirs": ["/x"], "time_zone": "Europe/Rome",
+        "components": ["energy"], "unit_system": {"length": "km"},
+    }, "Solar")
+    assert public == {
+        "latitude": 0, "longitude": 0, "elevation": 0, "radius": 0,
+        "location_name": "Solar", "config_dir": "", "internal_url": None,
+        "allowlist_external_dirs": [], "future_secret_dirs": [], "time_zone": "Europe/Rome",
+        "components": ["energy"], "unit_system": {"length": "km"},
+    }
+    assert sanitize.public_core_config({"location_name": "Elm Street"})["location_name"] == "Home"
+
+
+def test_only_published_devices_and_never_their_hardware_addresses():
+    devices = [
+        {"id": "a", "name": "Inverter", "connections": [["mac", "aa:bb"]], "identifiers": [["solar", "SN1"]],
+         "serial_number": "SN1", "configuration_url": "http://192.168.1.9", "via_device_id": "b", "model": "X"},
+        {"id": "b", "name": "Gateway"},
+    ]
+    out = sanitize.public_devices(devices, {"a"})
+    assert [d["id"] for d in out] == ["a"]
+    assert out[0]["model"] == "X" and out[0]["connections"] == [] and out[0]["identifiers"] == []
+    assert out[0]["serial_number"] is None and out[0]["configuration_url"] is None
+    assert out[0]["via_device_id"] is None, "a device that is not published is not pointed at"

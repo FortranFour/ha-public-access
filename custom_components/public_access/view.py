@@ -3,9 +3,10 @@
 Design rules enforced here:
 
 * Only GET is implemented, so every other verb gets an automatic 405.
-* The client never names an entity, a statistic or a date range. It may only pick a
-  period from a closed enum; ids come from the sanitized dashboard and the energy
-  preferences, resolved server-side.
+* What a visitor may read is decided server-side from the published views. The
+  two places a visitor names something themselves — history and the pictures
+  and clips fetched under `api/` — are both cut down to what is published
+  (history.parse_query, policy.Access.path_allowed).
 * Nothing is served unless the integration is enabled.
 * `X-Frame-Options: SAMEORIGIN` is applied by Home Assistant's own middleware after
   this handler returns and cannot be overridden from here, so embedding the page in
@@ -15,6 +16,7 @@ Design rules enforced here:
 
 from __future__ import annotations
 
+from datetime import timedelta
 import hashlib
 from homeassistant.helpers.json import json_dumps
 import logging
@@ -29,15 +31,14 @@ from homeassistant.core import HomeAssistant
 from . import assets, guard
 from .const import (
     CONF_CACHE_SECONDS,
-    CONF_DASHBOARD,
     CONF_ENABLED,
     CONF_FRAME_ANCESTORS,
     CONF_LOADING_BACKGROUND,
     CONF_NOINDEX,
-    CONF_VIEW_PATH,
     DEFAULT_CACHE_SECONDS,
     MAX_PUBLIC_SESSIONS,
     MAX_SESSIONS_PER_CLIENT,
+    MEDIA_RATE_LIMIT_PER_MINUTE,
     RATE_LIMIT_PER_MINUTE,
 )
 from .coordinator import PublicDashboardCoordinator
@@ -85,6 +86,7 @@ class PublicDashboardView(HomeAssistantView):
         self.extra_urls = [f"/{public_path}/{{extra:.+}}"]
         self._coordinator = coordinator
         self._limiter = RateLimiter()
+        self._media_limiter = RateLimiter(MEDIA_RATE_LIMIT_PER_MINUTE)
         self._sessions = guard.SessionLimiter(MAX_PUBLIC_SESSIONS, MAX_SESSIONS_PER_CLIENT)
         self.last_visit: dict[str, Any] | None = None
 
@@ -165,7 +167,9 @@ class PublicDashboardView(HomeAssistantView):
         visitor = guard.visitor_address(request)
         self._note_visit(request, visitor)
 
-        if not self._limiter.allow(visitor):
+        route = extra.strip("/")
+        media = route.startswith("api/") and not route.startswith("api/history/")
+        if not (self._media_limiter if media else self._limiter).allow(visitor):
             response = web.Response(text="429: Too Many Requests", status=429)
             response.headers["Retry-After"] = "60"
             return response
@@ -173,7 +177,7 @@ class PublicDashboardView(HomeAssistantView):
         # Mirror is the only way a dashboard is published. The live renderer and
         # the snapshot companion were removed in 0.4: entries still set to them
         # are served as mirror.
-        return await self._mirror(request, extra.strip("/"), visitor)
+        return await self._mirror(request, route, visitor)
 
     async def _mirror(
         self, request: web.Request, route: str, visitor: str | None
@@ -181,40 +185,62 @@ class PublicDashboardView(HomeAssistantView):
         """Home Assistant's real frontend over a read-only websocket proxy.
 
         Routes: the page itself (any sub-path, since the frontend routes views
-        client-side) and `ws`, the websocket the page is steered to.
+        client-side), `ws`, the websocket the page is steered to, and `api/...`,
+        where the page's REST requests are steered.
         """
-        options = self._options
-        dashboard = options.get(CONF_DASHBOARD) or ""
-        view_path = options.get(CONF_VIEW_PATH) or None
-
         if route == "ws":
             if not self._sessions.acquire(visitor):
                 response = web.Response(text="503: Too many visitors", status=503)
                 response.headers["Retry-After"] = "30"
                 return response
             try:
-                return await self._serve_ws(request, dashboard, view_path)
+                return await self._serve_ws(request)
             finally:
                 self._sessions.release(visitor)
         return await self._serve_page(request, route)
 
-    async def _serve_ws(
-        self, request: web.Request, dashboard: str, view_path: str | None
-    ) -> web.StreamResponse:
+    async def _serve_ws(self, request: web.Request) -> web.StreamResponse:
         from . import mirror
 
-        entity_ids, statistic_ids = await self._coordinator.async_mirror_allowlists()
-        templates = await self._coordinator.async_mirror_templates()
+        coordinator = self._coordinator
         return await mirror.async_serve_websocket(
             self.hass,
             request,
             public_path=self.public_path,
-            dashboard=dashboard,
-            view_path=view_path,
-            entity_ids=entity_ids,
-            statistic_ids=statistic_ids,
-            templates=templates,
+            dashboard=coordinator.dashboard,
+            access=await coordinator.async_access(),
+            publish=coordinator.publish,
+            title=coordinator.public_title,
         )
+
+    async def _serve_media(self, request: web.Request, route: str) -> web.StreamResponse:
+        """A picture, clip or calendar a card fetches from Home Assistant's REST API.
+
+        The page steers every such request here. If the path is one the
+        published views entitle a visitor to (a published camera's picture, a
+        listed Frigate event's thumbnail...), the visitor is sent on to a
+        link signed for that one path, valid for a minute, as the read-only
+        viewer. Anything else simply does not exist.
+        """
+        from homeassistant.components.http.auth import async_sign_path
+
+        from . import mirror
+
+        path = "/" + route
+        if request.query_string:
+            path += "?" + request.query_string
+        access = await self._coordinator.async_access()
+        if not access.path_allowed(path):
+            response = self._json({"message": "Not found"}, status=404)
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        _, token = await mirror.async_get_viewer(self.hass)
+        signed = async_sign_path(
+            self.hass, path, timedelta(seconds=60), refresh_token_id=token.id
+        )
+        response = web.Response(status=302, headers={"Location": signed})
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     async def _serve_page(self, request: web.Request, route: str) -> web.StreamResponse:
         from . import mirror
@@ -225,10 +251,10 @@ class PublicDashboardView(HomeAssistantView):
         if route == "api/history/period" or route.startswith("api/history/period/"):
             # Cards that read history over REST instead of the websocket
             # (ApexCharts) are steered here by the page; same shape, same
-            # answer, but only the published view's entities come back.
+            # answer, but only the published views' entities come back.
             from . import history
 
-            entity_ids, _ = await self._coordinator.async_mirror_allowlists()
+            entity_ids = (await self._coordinator.async_access()).entities
             start = route.removeprefix("api/history/period").strip("/") or None
             parsed = history.parse_query(
                 start, dict(request.query), entity_ids or set(),
@@ -244,8 +270,13 @@ class PublicDashboardView(HomeAssistantView):
             # isn't cacheable either.
             response.headers["Cache-Control"] = "no-store"
             return response
+        if route.startswith("api/"):
+            return await self._serve_media(request, route)
         html = await mirror.async_render_page(
-            self.hass, self.public_path, options.get(CONF_LOADING_BACKGROUND)
+            self.hass,
+            self.public_path,
+            options.get(CONF_LOADING_BACKGROUND),
+            self._coordinator.show_header,
         )
         if html is None:
             # Defensive: the frontend glue ships with the integration.

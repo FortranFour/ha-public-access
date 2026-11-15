@@ -1,4 +1,4 @@
-"""Public Access — publish one Home Assistant dashboard publicly, read-only."""
+"""Public Access — publish chosen views of one Home Assistant dashboard publicly, read-only."""
 
 from __future__ import annotations
 

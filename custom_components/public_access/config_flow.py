@@ -28,13 +28,19 @@ from homeassistant.helpers import selector
 
 from . import data as ha_data
 from .const import (
+    CONF_CAMERA_STREAMS,
     CONF_DASHBOARD,
     CONF_ENABLED,
     CONF_FRAME_ANCESTORS,
+    CONF_FRIGATE_CAMERAS,
     CONF_LOADING_BACKGROUND,
     CONF_NOINDEX,
     CONF_PUBLIC_PATH,
+    CONF_SHOW_TABS,
+    CONF_SUPPORT_VIEWS,
+    CONF_TITLE,
     CONF_VIEW_PATH,
+    CONF_VIEWS,
     DEFAULT_NOINDEX,
     DEFAULT_PUBLIC_PATH,
     DOMAIN,
@@ -44,8 +50,7 @@ from .const import (
 PATH_PATTERN = re.compile(r"^[a-z0-9_]{2,48}$")
 COLOR_PATTERN = re.compile(r"^#(?:[0-9a-f]{3}|[0-9a-f]{6})$")
 
-# Dropdown value for a first view that has no address of its own.
-FIRST_VIEW = "__first__"
+from .sanitize import FIRST_VIEW, configured_views  # noqa: E402
 
 
 def view_options(dashboard: dict[str, Any]) -> list[selector.SelectOptionDict]:
@@ -69,6 +74,29 @@ def view_options(dashboard: dict[str, Any]) -> list[selector.SelectOptionDict]:
 
 def _stored_view(value: str | None) -> str | None:
     return None if not value or value == FIRST_VIEW else value
+
+
+def _stored_views(values: Any) -> list[str]:
+    """The chosen views as stored: names, without blanks or repeats, in order."""
+    out: list[str] = []
+    for value in values if isinstance(values, (list, tuple)) else [values]:
+        name = str(value).strip().strip("/") if value is not None else ""
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def _with_missing(
+    views: list[selector.SelectOptionDict], chosen: list[str]
+) -> list[selector.SelectOptionDict]:
+    """Keep a chosen view in the list even when the dashboard no longer has it,
+    so opening the options does not silently drop it."""
+    known = {v["value"] for v in views}
+    return views + [
+        selector.SelectOptionDict(value=name, label=f"/{name} (not found)")
+        for name in chosen
+        if name not in known
+    ]
 
 
 def public_base_url(hass: Any) -> str:
@@ -123,7 +151,7 @@ class PublicAccessConfigFlow(ConfigFlow, domain=DOMAIN):
             views = view_options(self._dashboard(user_input[CONF_DASHBOARD]))
             if len(views) <= 1:
                 # One view (or none with an address): nothing to choose.
-                self._data[CONF_VIEW_PATH] = _stored_view(views[0]["value"]) if views else None
+                self._data[CONF_VIEWS] = [views[0]["value"]] if views else [FIRST_VIEW]
                 return await self.async_step_path()
             return await self.async_step_view()
 
@@ -152,24 +180,29 @@ class PublicAccessConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_view(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Pick the one view of the dashboard that will be public, by name."""
+        """Pick the views of the dashboard that will be public, by name."""
         dashboard = self._dashboard(self._data[CONF_DASHBOARD])
+        errors: dict[str, str] = {}
         if user_input is not None:
-            self._data[CONF_VIEW_PATH] = _stored_view(user_input[CONF_VIEW_PATH])
-            return await self.async_step_path()
+            chosen = _stored_views(user_input.get(CONF_VIEWS))
+            if chosen:
+                self._data[CONF_VIEWS] = chosen
+                return await self.async_step_path()
+            errors[CONF_VIEWS] = "no_views"
 
         views = view_options(dashboard)
         return self.async_show_form(
             step_id="view",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_VIEW_PATH, default=views[0]["value"]): selector.SelectSelector(
+                    vol.Required(CONF_VIEWS, default=[views[0]["value"]]): selector.SelectSelector(
                         selector.SelectSelectorConfig(
-                            options=views, mode=selector.SelectSelectorMode.LIST
+                            options=views, multiple=True, mode=selector.SelectSelectorMode.LIST
                         )
                     ),
                 }
             ),
+            errors=errors,
             description_placeholders={"dashboard": dashboard.get("title", "")},
         )
 
@@ -191,6 +224,8 @@ class PublicAccessConfigFlow(ConfigFlow, domain=DOMAIN):
                     options={
                         CONF_ENABLED: True,
                         CONF_NOINDEX: DEFAULT_NOINDEX,
+                        CONF_SHOW_TABS: True,
+                        CONF_CAMERA_STREAMS: True,
                     },
                 )
 
@@ -227,13 +262,22 @@ class PublicAccessOptionsFlow(OptionsFlow):
             color = (user_input.get(CONF_LOADING_BACKGROUND) or "").strip().lower()
             if color and not COLOR_PATTERN.match(color):
                 errors[CONF_LOADING_BACKGROUND] = "invalid_color"
+            chosen = _stored_views(user_input.get(CONF_VIEWS))
+            if not chosen:
+                errors[CONF_VIEWS] = "no_views"
+            support = [v for v in _stored_views(user_input.get(CONF_SUPPORT_VIEWS)) if v not in chosen]
             if not errors:
                 return self.async_create_entry(
                     data={
                         **user_input,
                         CONF_LOADING_BACKGROUND: color,
                         CONF_PUBLIC_PATH: path,
-                        CONF_VIEW_PATH: _stored_view((user_input.get(CONF_VIEW_PATH) or "").strip()),
+                        CONF_VIEWS: chosen,
+                        CONF_SUPPORT_VIEWS: support,
+                        CONF_TITLE: (user_input.get(CONF_TITLE) or "").strip(),
+                        CONF_FRIGATE_CAMERAS: _stored_views(user_input.get(CONF_FRIGATE_CAMERAS)),
+                        # What versions before 0.6 read: the first chosen view.
+                        CONF_VIEW_PATH: _stored_view(chosen[0]),
                     }
                 )
 
@@ -242,9 +286,11 @@ class PublicAccessOptionsFlow(OptionsFlow):
             (d for d in dashboards if d["url_path"] == current.get(CONF_DASHBOARD)), {"views": []}
         )
         views = view_options(current_dashboard)
-        current_view = current.get(CONF_VIEW_PATH) or (FIRST_VIEW if views and views[0]["value"] == FIRST_VIEW else "")
-        if current_view and current_view not in {v["value"] for v in views}:
-            views.append(selector.SelectOptionDict(value=current_view, label=f"/{current_view} (not found)"))
+        chosen_views = configured_views(current, CONF_VIEWS)
+        if chosen_views == [FIRST_VIEW] and views and views[0]["value"] != FIRST_VIEW:
+            # "The first view", from before views were chosen by name.
+            chosen_views = [views[0]["value"]]
+        support_views = configured_views(current, CONF_SUPPORT_VIEWS)
         options = [
             selector.SelectOptionDict(
                 value=item["url_path"], label=f"{item['title']} ({item['url_path']})"
@@ -256,37 +302,64 @@ class PublicAccessOptionsFlow(OptionsFlow):
             )
         ]
 
-        schema = vol.Schema(
-            {
-                vol.Required(CONF_ENABLED, default=current.get(CONF_ENABLED, True)): bool,
-                vol.Required(
-                    CONF_DASHBOARD, default=current.get(CONF_DASHBOARD)
-                ): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=options, mode=selector.SelectSelectorMode.DROPDOWN
-                    )
-                ),
-                vol.Optional(CONF_VIEW_PATH, default=current_view): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=views,
-                        custom_value=True,  # another dashboard's view can be typed
-                        mode=selector.SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                vol.Required(
-                    CONF_PUBLIC_PATH, default=current.get(CONF_PUBLIC_PATH)
-                ): str,
-                vol.Required(
-                    CONF_NOINDEX, default=current.get(CONF_NOINDEX, DEFAULT_NOINDEX)
-                ): bool,
-                vol.Optional(
-                    CONF_FRAME_ANCESTORS,
-                    default=current.get(CONF_FRAME_ANCESTORS) or "",
-                ): str,
-                vol.Optional(
-                    CONF_LOADING_BACKGROUND,
-                    default=current.get(CONF_LOADING_BACKGROUND) or "",
-                ): str,
-            }
-        )
-        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)
+        def view_selector(chosen: list[str]) -> selector.SelectSelector:
+            return selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=_with_missing(views, chosen),
+                    multiple=True,
+                    custom_value=True,  # another dashboard's views can be typed
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            )
+
+        fields: dict[Any, Any] = {
+            vol.Required(CONF_ENABLED, default=current.get(CONF_ENABLED, True)): bool,
+            vol.Required(
+                CONF_DASHBOARD, default=current.get(CONF_DASHBOARD)
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=options, mode=selector.SelectSelectorMode.DROPDOWN
+                )
+            ),
+            vol.Required(CONF_VIEWS, default=chosen_views): view_selector(chosen_views),
+            vol.Optional(CONF_SUPPORT_VIEWS, default=support_views): view_selector(support_views),
+            vol.Required(CONF_SHOW_TABS, default=current.get(CONF_SHOW_TABS, True)): bool,
+            vol.Optional(
+                CONF_TITLE, description={"suggested_value": current.get(CONF_TITLE) or ""}
+            ): str,
+            vol.Required(
+                CONF_PUBLIC_PATH, default=current.get(CONF_PUBLIC_PATH)
+            ): str,
+            vol.Required(
+                CONF_NOINDEX, default=current.get(CONF_NOINDEX, DEFAULT_NOINDEX)
+            ): bool,
+            vol.Required(
+                CONF_CAMERA_STREAMS, default=current.get(CONF_CAMERA_STREAMS, True)
+            ): bool,
+        }
+        # Offered only when the Frigate integration is there to ask.
+        frigate = ha_data.frigate_instances(self.hass)
+        chosen_cameras = [str(c) for c in current.get(CONF_FRIGATE_CAMERAS) or []]
+        if frigate or chosen_cameras:
+            cameras = sorted(set().union(*frigate.values()) | set(chosen_cameras)) if frigate else chosen_cameras
+            fields[vol.Optional(CONF_FRIGATE_CAMERAS, default=chosen_cameras)] = selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=cameras,
+                    multiple=True,
+                    custom_value=True,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            )
+        fields[
+            vol.Optional(
+                CONF_FRAME_ANCESTORS,
+                description={"suggested_value": current.get(CONF_FRAME_ANCESTORS) or ""},
+            )
+        ] = str
+        fields[
+            vol.Optional(
+                CONF_LOADING_BACKGROUND,
+                description={"suggested_value": current.get(CONF_LOADING_BACKGROUND) or ""},
+            )
+        ] = str
+        return self.async_show_form(step_id="init", data_schema=vol.Schema(fields), errors=errors)

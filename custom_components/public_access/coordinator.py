@@ -1,13 +1,17 @@
 """What the mirror may read for one published dashboard.
 
-It holds nothing between visits: every public connection gets the allowlists
-read fresh from the published view.
+Little is held between visits. What the published views allow is worked out
+from the dashboard as it is saved, kept for half a minute so that a page full
+of camera thumbnails does not read the dashboard once per picture, and dropped
+at once when the dashboard or the options change. The other thing remembered
+is which Frigate events were already listed to visitors (see
+policy.EventMemory).
 """
 
 from __future__ import annotations
 
 import logging
-import re
+import time
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -15,18 +19,33 @@ from homeassistant.core import HomeAssistant
 
 from . import data as ha_data
 from .const import (
+    CONF_CAMERA_STREAMS,
     CONF_DASHBOARD,
-    CONF_VIEW_PATH,
+    CONF_FRIGATE_CAMERAS,
+    CONF_PUBLIC_PATH,
+    CONF_SHOW_TABS,
+    CONF_SUPPORT_VIEWS,
+    CONF_TITLE,
+    CONF_VIEWS,
 )
-from .sanitize import view_matches
+from .policy import Access, EventMemory, FrigateAccess, frigate_cameras_in
+from .sanitize import (
+    collect_strings,
+    configured_views,
+    has_published_view,
+    publish_config,
+    referenced_ids,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
+# How long the worked-out access is reused. Short: an entity that appears in
+# Home Assistant after a restart is picked up without anyone doing anything.
+ACCESS_SECONDS = 30
 
 
 class PublicDashboardCoordinator:
-    """One published dashboard: its options, and the allowlists the mirror
-    applies to every visitor."""
+    """One published dashboard: its options, and what every visitor may read."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
@@ -34,6 +53,9 @@ class PublicDashboardCoordinator:
         # Cleared on unload: the route cannot be unregistered, so the view checks
         # this instead and answers 404 once the entry is gone.
         self.active = True
+        self._frigate_events = EventMemory()
+        self._access: Access | None = None
+        self._access_at = 0.0
 
     # -- configuration ---------------------------------------------------------
 
@@ -41,108 +63,150 @@ class PublicDashboardCoordinator:
     def options(self) -> dict[str, Any]:
         return {**self.entry.data, **self.entry.options}
 
+    @property
+    def dashboard(self) -> str:
+        return self.options.get(CONF_DASHBOARD) or ""
+
+    @property
+    def public_path(self) -> str:
+        return self.options.get(CONF_PUBLIC_PATH) or ""
+
+    @property
+    def published_views(self) -> list[str]:
+        return configured_views(self.options, CONF_VIEWS)
+
+    @property
+    def support_views(self) -> list[str]:
+        return configured_views(self.options, CONF_SUPPORT_VIEWS)
+
+    @property
+    def public_title(self) -> str | None:
+        return (self.options.get(CONF_TITLE) or "").strip() or None
+
+    @property
+    def show_header(self) -> bool:
+        """The tab bar is worth showing when there is more than one view."""
+        return bool(self.options.get(CONF_SHOW_TABS, True)) and len(self.published_views) > 1
+
     def invalidate(self) -> None:
-        """Called when the dashboard or the options change. Nothing is cached:
-        the mirror's allowlists are read fresh for every visitor's connection."""
+        """Called when the dashboard or the options change: what the views
+        allow is worked out again for the next request."""
+        self._access = None
 
-    async def async_mirror_allowlists(self) -> tuple[set[str] | None, set[str] | None]:
+    # -- what a visitor receives -------------------------------------------------
+
+    def publish(self, config: dict[str, Any]) -> dict[str, Any]:
+        """The dashboard cut down to the chosen views, under its public name."""
+        published = publish_config(
+            config,
+            published=self.published_views,
+            support=self.support_views,
+            dashboard=self.dashboard,
+            public_path=self.public_path,
+            title=self.public_title,
+        )
+        if not has_published_view(config, self.published_views):
+            _LOGGER.warning(
+                "None of the published views %s is in dashboard %r (views: %s); publishing nothing",
+                self.published_views,
+                self.dashboard,
+                ", ".join(str(v.get("path")) for v in config.get("views") or [] if isinstance(v, dict))
+                or "none",
+            )
+            published["views"] = []
+        return published
+
+    async def async_published_config(self) -> dict[str, Any] | None:
+        """The published dashboard, or None when it has no saved configuration."""
+        config = await ha_data.async_load_dashboard_config(self.hass, self.dashboard) if self.dashboard else None
+        return self.publish(config) if config else None
+
+    async def async_access(self) -> Access:
+        """What a visitor may read, reused for a short while (ACCESS_SECONDS)."""
+        now = time.monotonic()
+        if self._access is None or now - self._access_at > ACCESS_SECONDS:
+            self._access = await self._async_read_access()
+            self._access_at = now
+        return self._access
+
+    async def _async_read_access(self) -> Access:
         """What the mirrored frontend may read: every entity and statistic the
-        published view refers to, plus the energy preferences' statistics.
+        sent views refer to, the strings written in them, the cameras they
+        show, plus the energy preferences' statistics.
 
-        This scans the raw view rather than the sanitized one: in mirror mode
-        the real frontend draws every card, custom ones included, so their
-        entities must be readable — but nothing outside the view is.
+        This scans the views as they are sent rather than a list of known card
+        types: in mirror mode the real frontend draws every card, custom ones
+        included, so their entities must be readable — but nothing outside the
+        sent views is.
         """
-        url_path = self.options.get(CONF_DASHBOARD)
-        config = await ha_data.async_load_dashboard_config(self.hass, url_path) if url_path else None
-        if not config:
-            return set(), set()
-        view_path = self.options.get(CONF_VIEW_PATH) or None
-        chosen = None
-        for view in config.get("views", []) or []:
-            if isinstance(view, dict) and view_matches(view, view_path):
-                chosen = view
-                break
-        entities, statistics = _referenced_ids(chosen or {})
+        dashboard = self.dashboard
+        raw = await ha_data.async_load_dashboard_config(self.hass, dashboard) if dashboard else None
+        if not raw:
+            return Access(camera_streams=False)
+        # Scanned without the address rewrite: an entity or a template is
+        # allowed as the owner wrote it...
+        plain = publish_config(raw, published=self.published_views, support=self.support_views)
+        sent = self.publish(raw)
+        if not sent["views"]:
+            return Access(camera_streams=False)
+        entities, statistics, candidates = referenced_ids(plain)
+        # Entity ids inside templates count only if such an entity exists.
+        entities |= {c for c in candidates if self.hass.states.get(c) is not None}
+        # ... and a template is also allowed in the form the visitor's
+        # frontend holds it, with the dashboard's address replaced.
+        strings = collect_strings(plain) | collect_strings(sent)
         prefs = await ha_data.async_energy_prefs(self.hass)
         statistics |= ha_data.energy_statistic_ids(prefs)
         # Statistics of plain sensors share the entity id.
         statistics |= entities
-        return entities, statistics
+        return Access(
+            entities=entities,
+            statistics=statistics,
+            strings=strings,
+            devices=ha_data.device_ids(self.hass, entities),
+            camera_streams=bool(self.options.get(CONF_CAMERA_STREAMS, True)),
+            frigate=self._frigate_access(entities, strings),
+        )
+
+    def _frigate_access(self, entities: set[str], strings: set[str]) -> FrigateAccess | None:
+        """Published Frigate cameras: those whose camera entity is on a sent
+        view, those named in a card there, and those listed in the options."""
+        instances = ha_data.frigate_instances(self.hass)
+        if not instances:
+            return None
+        known: set[str] = set().union(*instances.values())
+        cameras = frigate_cameras_in(strings, known)
+        cameras |= ha_data.frigate_cameras_of(self.hass, entities) & known
+        cameras |= {str(c) for c in self.options.get(CONF_FRIGATE_CAMERAS) or []} & known
+        return FrigateAccess(instances=instances, cameras=cameras, events=self._frigate_events)
+
+    # -- compatibility: what versions before 0.6 called -------------------------
+
+    async def async_mirror_allowlists(self) -> tuple[set[str], set[str]]:
+        access = await self.async_access()
+        return access.entities, access.statistics
 
     async def async_mirror_templates(self) -> set[str]:
-        """Template strings the published view contains, verbatim.
-
-        The markdown card renders its content through render_template, which
-        can otherwise read any state; only text the owner put in the view may be
-        rendered.
-        """
-        url_path = self.options.get(CONF_DASHBOARD)
-        config = await ha_data.async_load_dashboard_config(self.hass, url_path) if url_path else None
-        if not config:
-            return set()
-        view_path = self.options.get(CONF_VIEW_PATH) or None
-        found: set[str] = set()
-
-        def walk(value: Any) -> None:
-            if isinstance(value, str):
-                if "{{" in value or "{%" in value or len(value) > 0:
-                    found.add(value)
-            elif isinstance(value, dict):
-                for item in value.values():
-                    walk(item)
-            elif isinstance(value, list):
-                for item in value:
-                    walk(item)
-
-        for view in config.get("views", []) or []:
-            if isinstance(view, dict) and view_matches(view, view_path):
-                walk(view)
-                break
-        return found
+        return (await self.async_access()).strings
 
     # -- owner-facing ----------------------------------------------------------
 
     async def async_owner_report(self) -> dict[str, Any]:
         """What a visitor can reach, for diagnostics. Never served publicly."""
-        entities, statistics = await self.async_mirror_allowlists()
-        templates = await self.async_mirror_templates()
+        access = await self.async_access()
+        sent = await self.async_published_config() or {"views": []}
         return {
-            "dashboard": self.options.get(CONF_DASHBOARD),
-            "view": self.options.get(CONF_VIEW_PATH) or "(first view)",
-            "entity_allowlist": sorted(entities) if entities is not None else "(no view found)",
-            "statistic_allowlist": sorted(statistics) if statistics is not None else "(no view found)",
-            "templates_allowed": len(templates),
+            "dashboard": self.dashboard,
+            "views_as_tabs": [
+                str(v.get("path") or "(first view)") for v in sent["views"] if v.get("visible", True) is not False
+            ],
+            "views_without_a_tab": [
+                str(v.get("path") or "(first view)") for v in sent["views"] if v.get("visible", True) is False
+            ],
+            "entity_allowlist": sorted(access.entities),
+            "statistic_allowlist": sorted(access.statistics),
+            "strings_allowed_as_templates": len(access.strings),
+            "live_camera_streams": access.camera_streams,
+            "frigate_cameras": sorted(access.frigate.cameras) if access.frigate else "(Frigate not found)",
+            "frigate_events_remembered": len(self._frigate_events),
         }
-
-
-_ENTITY_RE = re.compile(r"^[a-z_]+\.[a-z0-9_]+$")
-_STATISTIC_RE = re.compile(r"^[a-z0-9_]+:[a-z0-9_]+$")
-
-
-def _referenced_ids(node: Any) -> tuple[set[str], set[str]]:
-    """Every entity id and external statistic id mentioned anywhere in a view.
-
-    Card configs are free-form, especially custom cards, so this looks at every
-    string value rather than known keys. Over-including a string that merely
-    looks like an entity id costs nothing: it only widens the read allowlist to
-    something the owner wrote into the view themselves.
-    """
-    entities: set[str] = set()
-    statistics: set[str] = set()
-
-    def walk(value: Any) -> None:
-        if isinstance(value, str):
-            if _ENTITY_RE.match(value):
-                entities.add(value)
-            elif _STATISTIC_RE.match(value):
-                statistics.add(value)
-        elif isinstance(value, dict):
-            for item in value.values():
-                walk(item)
-        elif isinstance(value, list):
-            for item in value:
-                walk(item)
-
-    walk(node)
-    return entities, statistics

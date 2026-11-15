@@ -16,17 +16,18 @@
         }
       },
       "view": {
-        "title": "Quale vista?",
-        "description": "Una dashboard può avere più viste: le schede in alto in **{dashboard}**. Solo **una** diventa pubblica; le altre restano private.\n\nScegli la vista da pubblicare.",
+        "title": "Quali viste?",
+        "description": "Una dashboard può avere più viste: le schede in alto in **{dashboard}**. Scegli quelle che diventano pubbliche; i visitatori passano dall'una all'altra con le stesse schede. Ogni vista che lasci fuori resta privata e non viene nemmeno inviata al browser del visitatore.",
         "data": {
-          "view_path": "Vista da pubblicare"
+          "views": "Viste da pubblicare"
         }
       }
     },
     "error": {
       "invalid_path": "Usa da 2 a 48 caratteri: solo lettere minuscole, cifre e underscore (nessun trattino).",
       "path_reserved": "Questo percorso è riservato da Home Assistant.",
-      "path_in_use": "Questo percorso appartiene già a un pannello o a una dashboard. Usarlo nasconderebbe una parte del tuo Home Assistant."
+      "path_in_use": "Questo percorso appartiene già a un pannello o a una dashboard. Usarlo nasconderebbe una parte del tuo Home Assistant.",
+      "no_views": "Scegli almeno una vista."
     },
     "abort": {
       "single_instance_allowed": "Public Access è già configurato.",
@@ -37,25 +38,35 @@
     "step": {
       "init": {
         "title": "Impostazioni di Public Access",
-        "description": "La dashboard è pubblicata con il frontend di Home Assistant, dal vivo e in sola lettura: i visitatori vedono esattamente la vista scelta e non possono cambiare nulla. Il cambio del percorso pubblico ha effetto dopo il riavvio di Home Assistant.",
+        "description": "La dashboard è pubblicata attraverso il frontend di Home Assistant, dal vivo e in sola lettura: i visitatori vedono esattamente le viste che hai scelto e non possono modificare nulla. Il cambio del percorso pubblico ha effetto dopo il riavvio di Home Assistant.",
         "data": {
           "enabled": "Pubblica la dashboard",
           "dashboard": "Dashboard",
-          "view_path": "Vista da pubblicare (una scheda della dashboard)",
+          "views": "Viste da pubblicare (schede della dashboard)",
+          "support_views": "Viste di supporto (inviate, ma non mostrate come schede)",
+          "show_tabs": "Mostra la barra delle schede quando sono pubblicate più viste",
+          "title": "Titolo pubblico",
           "public_path": "Percorso pubblico (la parte dopo l’indirizzo del tuo Home Assistant)",
           "noindex": "Chiedi ai motori di ricerca di non indicizzarla",
+          "camera_streams": "Consenti ai visitatori di avviare i flussi video dal vivo",
+          "frigate_cameras": "Telecamere Frigate che i visitatori possono sfogliare",
           "frame_ancestors": "Origini autorizzate all'incorporamento (CSP frame-ancestors)",
           "loading_background": "Colore della schermata di caricamento (esadecimale, es. #111111; vuoto = predefinito di Home Assistant)"
+        },
+        "data_description": {
+          "support_views": "Per le card che riusano qualcosa da un'altra scheda: card di riferimento, popup, una planimetria 3D i cui popup mostrano card tenute altrove. Una vista di supporto non ha una scheda, ma un visitatore che la cerca può leggerla: non deve contenere nulla di privato.",
+          "title": "Mostrato nella scheda del browser al posto del nome della dashboard e del nome della tua casa. Vuoto: il nome della dashboard.",
+          "camera_streams": "Solo per le telecamere presenti in una vista pubblicata. Disattivato: quelle telecamere mostrano immagini fisse.",
+          "frigate_cameras": "Eventi, istantanee, clip e registrazioni di queste telecamere possono essere aperti dalle card delle viste pubblicate. Le telecamere la cui entità o il cui nome compare in una vista pubblicata sono incluse senza elencarle qui; tutte le altre restano chiuse."
         }
       }
     },
     "error": {
-      "license_refused": "Il server delle licenze ha rifiutato questa chiave: {reason}",
-      "cannot_connect": "Impossibile raggiungere il server delle licenze. Verifica che Home Assistant abbia accesso a internet e riprova.",
       "invalid_path": "Usa da 2 a 48 caratteri: solo lettere minuscole, cifre e underscore (nessun trattino).",
       "path_reserved": "Questo percorso è riservato da Home Assistant.",
       "path_in_use": "Questo percorso appartiene già a un pannello o a una dashboard.",
-      "invalid_color": "Usa un colore esadecimale come #111 o #1b1c1e, oppure lascia vuoto."
+      "invalid_color": "Usa un colore esadecimale come #111 o #1b1c1e, oppure lascia vuoto.",
+      "no_views": "Scegli almeno una vista."
     }
   },
   "issues": {

@@ -1,11 +1,11 @@
-"""History for the public page, read-only and limited to the published view.
+"""History for the public page, read-only and limited to the published views.
 
 Some cards (ApexCharts among them) fetch their history through Home Assistant's
 REST API rather than the websocket. On the public page that request would go to
 Home Assistant with no credentials and fail, so it is steered here instead:
 same path shape, same parameters, same answer format as
 ``GET /api/history/period/<start>`` — with one difference that is the whole
-point: only entities the published view refers to are ever returned, whatever
+point: only entities the published views refer to are ever returned, whatever
 the visitor asks for.
 """
 

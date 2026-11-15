@@ -1,225 +1,159 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/dllfpp/ha-public-access/main/custom_components/public_access/brand/icon@2x.png" width="112" alt="Public Access logo" />
+  <img src="https://raw.githubusercontent.com/FortranFour/ha-public-access/main/custom_components/public_access/brand/icon@2x.png" width="112" alt="Public Access logo" />
   <h1>Public Access</h1>
-  <p><strong>Share one Home Assistant dashboard with anyone — read-only, on your own address, with no login.</strong></p>
-  <p>Your real dashboard, live, behind glass: visitors see it exactly as you designed it and cannot change anything.</p>
+  <p><strong>Share a Home Assistant dashboard with anyone — read-only, on your own address, with no login.</strong></p>
+  <p>Your real dashboard, live, behind glass: its tabs, its 3D floor plan, its cameras. Visitors see it as you designed it and cannot change anything.</p>
 
-[![Release](https://img.shields.io/github/v/release/dllfpp/ha-public-access?style=flat-square)](https://github.com/dllfpp/ha-public-access/releases)
-[![Validate](https://img.shields.io/github/actions/workflow/status/dllfpp/ha-public-access/validate.yml?branch=main&label=validate&style=flat-square)](https://github.com/dllfpp/ha-public-access/actions/workflows/validate.yml)
-[![HACS custom](https://img.shields.io/badge/HACS-custom%20repository-41BDF5?style=flat-square)](https://hacs.xyz/)
 ![Home Assistant 2026.1+](https://img.shields.io/badge/Home%20Assistant-2026.1%2B-18bcf2?style=flat-square)
+[![HACS custom](https://img.shields.io/badge/HACS-custom%20repository-41BDF5?style=flat-square)](https://hacs.xyz/)
 [![License MIT](https://img.shields.io/badge/license-MIT-2f855a?style=flat-square)](LICENSE)
-![Free](https://img.shields.io/badge/price-free-2f855a?style=flat-square)
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-FFDD00?style=flat-square&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/dllfpp)
 </div>
 
 > [!NOTE]
-> **Public Access is free and open source since 0.5 (MIT license).** No trial, no key, no subscription, no account: install it from HACS and publish your dashboard. If it is useful to you, a [donation via Buy Me a Coffee](https://buymeacoffee.com/dllfpp) is welcome, entirely optional.
+> This is a fork of [dllfpp/ha-public-access](https://github.com/dllfpp/ha-public-access), which publishes **one view** of a dashboard. The mirror, the read-only design and most of the code are dllfpp's work; if it is useful to you, [their donation link](https://buymeacoffee.com/dllfpp) is the right place to say so. The fork adds what a whole-house dashboard needs: several views with the tab bar, cards that reuse cards from other tabs, 3D floor plans, cameras and Frigate. It installs under the same name, so it replaces the original rather than sitting beside it.
 
-<img width="1920" height="1200" alt="A credential-free wall screen showing a Home Assistant dashboard, read-only, published with Public Access" src="https://raw.githubusercontent.com/dllfpp/ha-public-access/main/docs/screenshots/wall-screen.png" />
+<img width="1280" alt="A published dashboard: the tab bar, and a 3D floor plan with a room's controls open" src="https://raw.githubusercontent.com/FortranFour/ha-public-access/main/docs/screenshots/tabs-floorplan.png" />
 
-## One dashboard, for everyone to see
+## What the fork adds
 
-| Your real dashboard | Nothing to press | Only what you chose |
-| --- | --- | --- |
-| Your theme, your layout, your custom HACS cards, history charts and animations. | Every command, save and script is refused before it reaches Home Assistant. | One view of one dashboard; every other tab and dashboard stays private. |
-| **On your own address** | **Nothing to configure** | **Your data stays home** |
-| A link like `https://home.example.com/solar`: no account, no token, no app. | Works behind Cloudflare and Nginx Proxy Manager as it is. | Pages are served by your Home Assistant; nothing is sent anywhere else. |
-
-## Why Public Access
-
-- Solar production for the neighbours, a weather station for the village, a guest screen for a holiday rental.
-- River levels or noise for a community, a greenhouse or apiary status page, an office status board.
-- A credential-free wall display or kiosk: a stolen tablet gives away nothing.
-- Visitors get Home Assistant's own frontend, without header, sidebar or anything to press.
-- Two independent locks keep it read-only: a read-only message filter and a read-only system user.
-- Built-in limits keep a popular page from overloading your instance.
+| | |
+| --- | --- |
+| **Several views** | Pick any number of the dashboard's tabs. Visitors get Home Assistant's own tab bar for them, without the menu, edit, search and assistant buttons. Subviews keep their back arrow. With one view, or with the tab bar switched off, the page is the view and nothing else, as before. |
+| **Links between views** | A card that navigates to `/your-dashboard/lights` goes to `/your-public-path/lights`. The dashboard's real address and name are replaced before anything is sent; a public title replaces them in the browser tab. Navigation to anything outside the published dashboard is not made. |
+| **Supporting views** | Views that are sent but have no tab, for cards that reuse something kept on another tab: [Dashboard References](https://github.com/FortranFour/dashboard-references) cards, popups, a floor plan whose room panels take their entities from source cards elsewhere. |
+| **3D floor plans** | [floor3dx-card](https://github.com/FortranFour/floor3dx-card) and its rooms card draw as they do for you: templated titles and readouts, room panels, pictures on model surfaces, entities named only inside a template. Other cards of the floor3d family ask Home Assistant for the same things. |
+| **Cameras** | Pictures always; live streams (HLS, WebRTC) for cameras on a published view, unless switched off. |
+| **Frigate** | Cards can list events and reviews, show thumbnails and snapshots, play clips and recordings, and open live streams, for published cameras only. Works with the [Advanced Camera Card](https://github.com/dermotduffy/advanced-camera-card) and the [Wildlife Card](https://github.com/FortranFour/wildlife-card). |
+| **Less about your home** | Visitors' browsers no longer receive the home's coordinates and name, folders and addresses of the installation, devices that are not on a published view, or any device's MAC address, serial number and configuration link. Logbook lines do not say who or what caused them. |
 
 ## Install with HACS
 
 Requires **Home Assistant 2026.1 or later**.
 
-[![Open the repository in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=dllfpp&repository=ha-public-access&category=integration)
-
-1. Open the link above, or in HACS open **⋮ → Custom repositories** and add `https://github.com/dllfpp/ha-public-access` with category **Integration**.
+1. In HACS open **⋮ → Custom repositories** and add `https://github.com/FortranFour/ha-public-access` with category **Integration**. If the original Public Access is installed, remove its repository from HACS first; your configuration is kept.
 2. Download **Public Access** and restart Home Assistant.
-3. Go to **Settings → Devices & services → Add integration → Public Access**, then pick the dashboard, the view and the public path.
+3. Go to **Settings → Devices & services → Add integration → Public Access**, then pick the dashboard, the views and the public path. An existing entry keeps publishing its one view until you add more in **Configure**.
 4. Open the public link in a private window to see exactly what your visitors see.
 
-> **Tip:** create a dashboard just for the public, with only what strangers may see. Don't publish your main dashboard.
+> **Publish on purpose.** Everything on a published view is visible to anyone who has the link, and so is everything on a supporting view to a visitor who looks for it. There is no password: the public path is the only thing between a stranger and the page, so for a dashboard with cameras choose a long one nobody would guess (`house_7c41f09be2` rather than `public`), share the link only with whom you mean to, and switch the integration off when the visit is over.
 
-> **Public Access does not appear under Add integration?** Most often Home Assistant was not restarted after the download, or the repository was added with a category other than **Integration**.
+## The things you choose
 
-## At a glance
-
-| | |
-| --- | --- |
-| **What is public** | One view of one dashboard, at a path you choose on your own address |
-| **What visitors can do** | Look, switch periods, read tooltips; never press, save or run anything |
-| **Visitors at once** | Up to 25, and 4 per address; past that, new visitors are asked to retry |
-| **Requests** | 60 a minute per visitor address |
-| **Search engines** | Asked not to index the page (can be turned off) |
-| **What leaves your home** | Nothing: no account, no license server, no telemetry |
-| **Price** | Free, open source (MIT). [Donations welcome](https://buymeacoffee.com/dllfpp) |
-
-## The two things you choose
-
-Everything you publish is described by two names. Say your Home Assistant is at `https://home.example.com`, and you have a dashboard called **Energy** with three tabs at the top: *Overview*, *Solar* and *Costs*.
+Say Home Assistant is at `https://home.example.com` and the dashboard **House** (`dashboard-house`) has the tabs *Summary*, *Controls*, *Security*, *3D* and *Workshop*.
 
 | | What it is | In the example |
 | --- | --- | --- |
-| **The view** | *What* is public: one of the tabs along the top of a dashboard. The other tabs, and every other dashboard, are not even sent to the visitor's browser. | *Solar* |
-| **The public path** | *Where* it is public: the word added after your Home Assistant address to make the link you give people. | `solar` → `https://home.example.com/solar` |
+| **The views** | *What* is public: the tabs visitors get. Every other view, and every other dashboard, is not even sent to the visitor's browser. | *Summary*, *Security*, *3D* |
+| **Supporting views** | Sent without a tab, so cards on the published views can find what they refer to. | *Controls*, if *3D*'s room panels take their entities from cards there |
+| **The public path** | *Where* it is public: the word after your Home Assistant address. | `house_7c41f09be2` → `https://home.example.com/house_7c41f09be2` |
+| **The public title** | What the browser tab says instead of the dashboard's and the home's own names. | `Lake house` |
 
 > A view can be picked if it has an address of its own (the view's settings, *URL*), except the first view of the dashboard, which always can.
 
-The public path uses lowercase letters, digits and underscores, with **no hyphen**: every Home Assistant dashboard address contains a hyphen, so a public path without one can never clash with a dashboard of yours. Paths Home Assistant already uses (`config`, `energy`, `history`, …) are refused, to keep your own interface intact.
-
-## Security
-
-- **Only reading is forwarded.** The visitor's page talks to Public Access, not to Home Assistant, and only messages that *read* (states, statistics, the dashboard itself) are passed on. Commands, saves, scripts and templates are refused.
-- **A read-only user underneath.** What is passed on runs as a system user in Home Assistant's own read-only group, so even a message that slipped through would be refused by Home Assistant.
-- **Only the published entities.** Only the entities the published view shows are visible, and no password or token ever reaches the visitor's browser.
-- **Your own login is untouched.** The public page never writes to the browser storage your Home Assistant uses.
-- **Auditable.** All the code is in this repository, including the glue that makes Home Assistant's frontend work behind the glass (`mirror_core.py`), which runs only after the checks above, so it can adapt what a visitor sees but never widen it. Nothing is downloaded at runtime.
-
-> **What is on the view is visible, though:** if the view shows a camera or a map, visitors see it. Build the public view on purpose.
-
-The [`tests/`](tests) folder holds the automated checks GitHub runs on every change and release, among them that the integration contains no code able to write to Home Assistant. Home Assistant never downloads it: HACS installs only `custom_components/public_access`.
-
-## Behind Cloudflare or Nginx Proxy Manager
-
-**Nothing to configure.** Public Access tells visitors apart by itself: behind Cloudflare it reads the visitor's address from the `CF-Connecting-IP` header that Cloudflare sets (and only when the connection really comes from Cloudflare), behind your own front server, such as Nginx Proxy Manager, from the address that server recorded. Visitor caps and rate limits work out of the box, and the public page never sends a login that could fail, so it cannot get anyone banned.
-
-**Optional, for your Home Assistant in general.** Unrelated to Public Access: if Home Assistant is reachable through a front server it does not trust (Cloudflare, Nginx Proxy Manager), it sees every visitor as that server, and a few failed logins from anyone (a stale tab of your own dashboard is enough) ban it for everybody. If you ever meet random `403: Forbidden`, mark those servers as trusted: on recent versions in **Settings → System → Network**, on older ones in YAML. With Cloudflare in front, list its ranges too (<https://www.cloudflare.com/ips/>).
-
-<details><summary>YAML for older Home Assistant versions</summary>
-
-```yaml
-http:
-  use_x_forwarded_for: true
-  trusted_proxies:
-    - 172.30.33.0/24        # Home Assistant OS add-ons (NPM, cloudflared), if you use one
-    # Cloudflare, when the DNS record is proxied (orange cloud): https://www.cloudflare.com/ips/
-    - 173.245.48.0/20
-    - 103.21.244.0/22
-    - 103.22.200.0/22
-    - 103.31.4.0/22
-    - 141.101.64.0/18
-    - 108.162.192.0/18
-    - 190.93.240.0/20
-    - 188.114.96.0/20
-    - 197.234.240.0/22
-    - 198.41.128.0/17
-    - 162.158.0.0/15
-    - 104.16.0.0/13
-    - 104.24.0.0/14
-    - 172.64.0.0/13
-    - 131.0.72.0/22
-    - 2400:cb00::/32
-    - 2606:4700::/32
-    - 2803:f800::/32
-    - 2405:b500::/32
-    - 2405:8100::/32
-    - 2a06:98c0::/29
-    - 2c0f:f248::/32
-```
-
-</details>
+The public path uses lowercase letters, digits and underscores, with **no hyphen**: every Home Assistant dashboard address contains a hyphen, so a public path without one can never clash with a dashboard of yours. Paths Home Assistant already uses (`config`, `energy`, `history`, …) are refused.
 
 ## Options
 
 | Option | Default | What it does |
 | --- | --- | --- |
 | Serve the public dashboard | on | Off: the address answers "not found", as if never configured |
-| Dashboard, view to publish | — | What is public |
-| Public path | `public` | Where it is public |
+| Dashboard, views to publish | — | What is public |
+| Supporting views | — | Sent, but not shown as tabs |
+| Show the tab bar | on | Off: no header at all, even with several views; cards still navigate between them |
+| Public title | the dashboard's name | Shown in the browser tab and as the installation's name |
+| Public path | `public` | Where it is public. A change takes effect after a restart |
 | Ask search engines not to index it | on | Keeps the page out of Google and friends |
-| Allowed embedding origins | — | Sites allowed to show the page in a frame (see [For the curious](#for-the-curious)) |
-| Loading screen colour | — | A hex colour (e.g. `#111111`) for Home Assistant's launch screen. Empty: the frontend's default, near-white unless the device is in dark mode. Useful on wall screens and digital signage, where the white flash shows on every reload |
+| Let visitors start live camera streams | on | Off: cameras on published views show still pictures; no HLS or WebRTC stream is started for a visitor |
+| Frigate cameras visitors may browse | — | Adds cameras to the ones found on the published views (see below). Offered when the Frigate integration is installed |
+| Allowed embedding origins | — | Sites allowed to show the page in a frame |
+| Loading screen colour | — | A hex colour for Home Assistant's launch screen, for wall screens |
+
+## Cameras and Frigate
+
+A camera entity on a published view can be seen: its picture, and its live stream if streams are on. That needs no setting.
+
+For Frigate, a camera is **published** when any of these holds:
+
+- its camera entity is on a published or supporting view;
+- its Frigate name is written in a card there (`cameras: [Driveway, Front]`);
+- it is listed under **Frigate cameras visitors may browse** in the options. Use this for a card that shows every camera without naming any.
+
+For published cameras, cards can list events and reviews, receive new ones as they happen, and open thumbnails, snapshots, clips, recordings and live streams. For every other camera each of those is refused, whatever the card asks for:
+
+- event and review lists are asked for published cameras only, and filtered again when Frigate answers;
+- a thumbnail, snapshot or clip is served only for an event that was first listed to a visitor that way, so guessing an event id opens nothing;
+- recordings, previews and live streams are checked by camera name;
+- marking a review as seen and keeping an event are changes, and stay refused like every other change;
+- go2rtc's own stream list, which can show camera logins, is never served.
+
+Home Assistant gives every camera and image entity a token in its state, which opens that entity's snapshot (and, for cameras that have one, its MJPEG stream). A visitor's browser needs that token to draw the picture, so it has it; it rotates every few minutes and opens nothing else.
+
+The Frigate integration's notification links (`/api/frigate/notifications/<event>/…`) are public by its own design unless you switch that off in the Frigate integration's options. Public Access neither adds to nor takes from that.
+
+## Security
+
+- **Only reading is forwarded.** The visitor's page talks to Public Access, not to Home Assistant, and only messages that *read* are passed on. Commands, saves, scripts and arbitrary templates are refused.
+- **A read-only user underneath.** What is passed on runs as a system user in Home Assistant's own read-only group, so a message that slipped through would be refused by Home Assistant.
+- **Only what the views use.** A visitor can read the entities written in the published and supporting views (as an entity, or inside a template there), their history and logbook, and their devices' names. Templates are rendered only if their text is in those views.
+- **Signed links are checked.** Cards get pictures and video through short-lived signed links. Home Assistant would sign any path for a logged-in user; for a visitor, Public Access signs only a published camera's or image's picture, a published calendar, and Frigate media of published cameras. The rule is in [`policy.py`](custom_components/public_access/policy.py), with its tests in [`tests/test_policy.py`](tests/test_policy.py).
+- **REST requests stay home too.** Anything a card fetches from `/api/…` is steered to the public endpoint, which answers under the same rule and otherwise says "not found". Nothing reaches Home Assistant with the page's placeholder login.
+- **Your own login is untouched.** The public page never writes to the browser storage your Home Assistant uses.
+- **Auditable.** All the code is in this repository. Nothing is downloaded at runtime.
+
+What a visitor still learns besides the views: which integrations are loaded, the names of your areas, floors, labels and themes, your units, language and time zone, and the dashboard's resources (custom cards). Diagnostics (**Settings → Devices & services → Public Access → ⋮ → Download diagnostics**) list exactly which views, entities and Frigate cameras are open.
+
+The [`tests/`](tests) folder holds the automated checks, among them that the integration contains no code able to write to Home Assistant, that a missing view publishes nothing rather than another view, and that nothing is signed without asking the policy.
+
+## What was tested, and what was not
+
+Tested on Home Assistant 2026.11.1 in headless Chrome, with a dashboard built for the purpose: tab bar and navigation, subviews, references across views, floor3dx-card 2.19.5 and its rooms card, Dashboard References 0.1.0-beta.3, Wildlife Card 1.3.4, Advanced Camera Card 8.2.0, and a list of things a hostile visitor might send.
+
+Frigate was a stand-in that answers like the Frigate integration (same messages, same addresses, canned events), not a Frigate server. So the rules were exercised, and the cards' lists, thumbnails and pushed events worked through them, but **playing a clip or a recording and live video (HLS, WebRTC, go2rtc/MSE) have not been seen working end to end**. Try them on your own installation before relying on them, and please report what you find.
+
+Not supported: cards that pick their entities at run time from everything in Home Assistant (auto-entities, area and strategy dashboards), since only entities written in the views are sent; popups opened by a script or an automation, since those are service calls; Frigate's own web interface.
+
+## Limits
+
+| | |
+| --- | --- |
+| **Visitors at once** | Up to 25, and 4 per address; past that, new visitors are asked to retry |
+| **Requests** | 60 pages a minute per visitor address, and 600 pictures or clips |
+| **What leaves your home** | Nothing: no account, no license server, no telemetry |
+
+## Behind Cloudflare or Nginx Proxy Manager
+
+**Nothing to configure.** Public Access tells visitors apart by itself: behind Cloudflare it reads the visitor's address from the `CF-Connecting-IP` header that Cloudflare sets (and only when the connection really comes from Cloudflare), behind your own front server, such as Nginx Proxy Manager, from the address that server recorded.
+
+Live video is another matter: WebRTC needs a route from the visitor to your cameras or go2rtc that a web proxy does not provide, so through Cloudflare or Nabu Casa expect HLS or still pictures unless you have set that up for your own use already.
 
 ## Troubleshooting
 
 | Problem | What to do |
 | --- | --- |
-| **The address shows "not found"** | The integration is switched off in its options, or you changed the public path: a new path starts working after a Home Assistant restart (a notice reminds you). |
+| **The address shows "not found"** | The integration is switched off in its options, or you changed the public path: a new path starts working after a Home Assistant restart. |
 | **My dashboard is not in the list** | Only dashboards saved at least once can be published. Open it, make any change, save. |
-| **My view is not in the list** | Give it an address: open the view's settings and fill in *URL*. |
-| **The path was refused** | It contains a hyphen or is already used by Home Assistant. Pick another word. |
-| **The page loads forever** | Reload with the cache cleared (Ctrl/Cmd + Shift + R). If it persists, [open an issue](https://github.com/dllfpp/ha-public-access/issues) with your Home Assistant version. |
-| **Everyone gets `403: Forbidden` now and then** | Home Assistant banned your front server's address after failed logins: see [Behind Cloudflare or Nginx Proxy Manager](#behind-cloudflare-or-nginx-proxy-manager). Remove that server's addresses from `ip_bans.yaml`, restart, and reload any tab still showing the public page from a version before 0.4.2. |
-| **After opening the public page, my own Home Assistant answers 403** | Versions before September 2026 stored the public page's placeholder login in your browser, where your real Home Assistant then rejected it until its login protection blocked the address. Current versions never store it and clean up what older ones left. Remove the address from `ip_bans.yaml` (or restore a backup) and restart; then clear the site data of your Home Assistant address in any browser that opened the public page. |
+| **A view is not in the list** | Give it an address: open the view's settings and fill in *URL*. |
+| **A card says it cannot find its source, or a popup is empty** | What it refers to is on a view that is not sent. Add that view under **Supporting views**. |
+| **A card is blank or shows "entity not found"** | Its entity is not written in the view (it is chosen at run time, or comes from another dashboard). Diagnostics list the entities that are open. |
+| **A Frigate card shows no events** | Its cameras are not published: list them under **Frigate cameras visitors may browse**. |
+| **The page loads forever** | Reload with the cache cleared (Ctrl/Cmd + Shift + R). |
 
-## Free and open source
-
-Public Access is **free for everyone**, with no trial, no account and no limits beyond the safety ones above. The code is released under the [MIT license](LICENSE): use it, study it, change it, share it.
-
-> Upgrading from a version before 0.5? Nothing to do: your published dashboard keeps working, the license key you entered is simply no longer used.
-
-## Support the project
-
-If Public Access is useful to you, a donation helps me keep it working with every new Home Assistant release.
-
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Donate-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/dllfpp)
-
-## Support and feedback
-
-- [Report a bug or ask for a feature](https://github.com/dllfpp/ha-public-access/issues)
-- [Discuss it on the Home Assistant forum](https://community.home-assistant.io/t/public-access-publish-one-dashboard-publicly-read-only-on-your-own-domain/1026819)
-- Report a vulnerability privately through the repository's *Security → Report a vulnerability*, never in a public issue
-- Anything private: awiteva28@gmail.com
-
-## For the curious
-
-<details>
-<summary><b>Embedding the page in your own website</b></summary>
-
-Home Assistant forbids framing its pages (`X-Frame-Options: SAMEORIGIN`), and an integration cannot
-change that. Drop the header at the server in front of Home Assistant, on the public path only — for Nginx or Nginx Proxy
-Manager:
-
-```nginx
-location /your-path {
-    proxy_pass http://homeassistant:8123;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_hide_header X-Frame-Options;
-}
-```
-
-Then set **Allowed embedding origins** in the options, e.g. `'self' https://www.example.com`.
-
-</details>
-
-<details>
-<summary><b>Security details and reporting a vulnerability</b></summary>
-
-The allowlist of forwarded messages is in
-[`mirror.py`](custom_components/public_access/mirror.py); the checks on views and the default
-dashboard in [`sanitize.py`](custom_components/public_access/sanitize.py). The test suite checks, among other
-things, that the package contains no write-capable call, that a missing view publishes nothing rather
-than another view, and that the owner's default dashboard never reaches the visitor.
-
-Please report a vulnerability privately through the repository's *Security → Report a
-vulnerability*, not in a public issue.
-
-</details>
-
-<details>
-<summary><b>Development</b></summary>
+## Development
 
 ```bash
-git clone https://github.com/dllfpp/ha-public-access.git
+git clone https://github.com/FortranFour/ha-public-access.git
 cd ha-public-access
 python -m pytest tests -q
 ```
 
-Copy `custom_components/public_access` into your `config/custom_components/` and restart Home
-Assistant to try a change.
+The tests that need Home Assistant are skipped without it; `pip install homeassistant` runs them all.
 
-</details>
+Embedding the page in your own site works as in the original: drop `X-Frame-Options` at the server in front of Home Assistant on the public path, and set **Allowed embedding origins**.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Original work © dllfpp; fork changes © FortranFour.
 
 ---
 
-<sub>Not affiliated with the Home Assistant project, the Open Home Foundation or Nabu Casa.</sub>
+<sub>Not affiliated with the Home Assistant project, the Open Home Foundation, Nabu Casa, Frigate or the original author.</sub>
