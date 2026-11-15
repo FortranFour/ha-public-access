@@ -86,12 +86,13 @@ def test_the_only_visitor_parameters_are_checked_against_what_is_published():
     assert "history.parse_query" in text and text.count("dict(request.query)") == 1
     assert text.count("request.query_string") == 2
     media = text[text.index("async def _serve_media"):text.index("async def _serve_page")]
-    # Two things are signed there, each after its own check: a stream's
-    # description, fetched and cleaned here and never handed over as a link,
-    # and a path the policy allows.
-    first, second = [m.start() for m in __import__("re").finditer(r"async_sign_path\(\n", media)]
-    assert media.index("access.stream_info_allowed(path)") < first < media.index("access.path_allowed(path)") < second
-    assert media.index("clean_stream_info(info)") > first
+    # Three things are signed there, each after its own check: a stream's
+    # description and LLM Vision's timeline, both fetched here and passed on
+    # cleaned, never handed over as a link, and a path the policy allows.
+    stream, timeline, link = [m.start() for m in __import__("re").finditer(r"async_sign_path\(\n", media)]
+    assert media.index("access.stream_info_allowed(path)") < stream < media.index("clean_stream_info(info)")
+    assert media.index("access.llmvision_events_allowed(path)") < timeline < media.index("access.llmvision_events(timeline)")
+    assert media.index("access.path_allowed(path)") < link
     history_module = (PACKAGE / "history.py").read_text(encoding="utf-8")
     assert "[e for e in wanted if e in allowed]" in history_module
 
@@ -104,7 +105,7 @@ def test_nothing_is_signed_without_asking_the_policy():
     assert branch.index("self._access.path_allowed(") < branch.index("self._refuse(")
     for name in ("view.py", "mirror.py", "coordinator.py", "data.py", "mirror_core.py"):
         text = (PACKAGE / name).read_text(encoding="utf-8")
-        assert text.count("async_sign_path(\n") == (2 if name == "view.py" else 0), name
+        assert text.count("async_sign_path(\n") == (3 if name == "view.py" else 0), name
 
 
 def test_templates_are_rendered_only_written_or_watched():

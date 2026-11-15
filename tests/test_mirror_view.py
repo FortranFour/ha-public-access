@@ -108,6 +108,8 @@ def _session(access):
     wire = _Wire()
     session = MirrorSession.__new__(MirrorSession)
     session._ws = session._loop = session._connection = wire
+    session._hass = type("Hass", (), {"states": type("States", (), {"get": staticmethod(
+        lambda entity_id: object() if entity_id in EXISTING else None)})})()
     session._public_path, session._dashboard, session._title = "solar", "energy-public", "Solar"
     session._access = access
     session._entities, session._statistics, session._templates = access.entities, access.statistics, access.strings
@@ -118,6 +120,10 @@ def _session(access):
     session._error = lambda msg_id, code, message: {
         "id": msg_id, "type": "result", "success": False, "error": {"code": code, "message": message}}
     return session, wire
+
+
+# Entities Home Assistant has; only some are published.
+EXISTING = {"sensor.pv", "camera.front", "light.porch", "lock.safe", "sensor.secret"}
 
 
 def _access():
@@ -190,6 +196,7 @@ def test_refused_before_it_reaches_home_assistant(msg):
     {"type": "config/entity_registry/get", "entity_id": "camera.front"},
     {"type": "frigate/recordings/summary", "instance_id": "frigate", "camera": "Front"},
     {"type": "media_source/resolve_media", "media_content_id": "media-source://frigate/frigate/event/clips/Front/1700.1-ab"},
+    {"type": "map_tiles/access_token"},
     {"type": "uix/connect", "browserID": "x"},
     {"type": "uix/get_foundries"},
 ])
@@ -382,3 +389,33 @@ def test_a_streams_description_is_served_cleaned_never_signed():
 def test_a_cards_note_for_the_owners_log_is_dropped():
     _, wire = _ask(type="uix/log", message="x")
     assert wire.answers[0]["success"] is True and not wire.forwarded
+
+
+def test_a_written_template_cannot_be_pointed_at_another_entity():
+    """ "{{ states(entity) }}" is the owner's, for the entity on the card. A
+    visitor who sends it with another entity in its variables is refused."""
+    access = _access()
+    access.strings.add("{{ states(entity) }} {{ states(config.entity) }}")
+    template = "{{ states(entity) }} {{ states(config.entity) }}"
+    _, wire = _ask(access, type="render_template", template=template,
+                   variables={"entity": "light.porch", "config": {"entity": "sensor.pv", "icon": "mdi:home", "file": "plan.png"}})
+    assert len(wire.forwarded) == 1
+    for variables in ({"entity": "lock.safe"}, {"config": {"entity": "sensor.pv", "more": ["x", {"y": "sensor.secret"}]}}):
+        session, wire = _ask(access, type="render_template", template=template, variables=variables)
+        assert _refused(wire) and session.notes, variables
+
+
+def test_uix_is_sent_only_the_foundries_in_use():
+    access = _access()
+    access.foundries = {"badge"}
+    out = _answer("uix/connect", event={"result": {"foundries": {"badge": 1, "unused": 2}}}, access=access)
+    assert out["event"] == {"result": {"foundries": {"badge": 1}}}
+    out = _answer("uix/get_foundries", {"foundries": {"badge": 1, "unused": 2}}, access=access)
+    assert out["result"] == {"foundries": {"badge": 1}}
+
+
+def test_the_coordinates_stay_when_the_owner_says_so():
+    access = _access()
+    access.hide_location = False
+    out = _answer("get_config", {"latitude": 47.6, "longitude": -122.3, "location_name": "Elm Street", "config_dir": "/config"}, access=access)
+    assert out["result"] == {"latitude": 47.6, "longitude": -122.3, "location_name": "Solar", "config_dir": ""}

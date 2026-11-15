@@ -158,3 +158,12 @@ def test_only_published_devices_and_never_their_hardware_addresses():
     assert out[0]["model"] == "X" and out[0]["connections"] == [] and out[0]["identifiers"] == []
     assert out[0]["serial_number"] is None and out[0]["configuration_url"] is None
     assert out[0]["via_device_id"] is None, "a device that is not published is not pointed at"
+
+
+def test_the_coordinates_can_be_left_in_and_nothing_else():
+    public = sanitize.public_core_config(
+        {"latitude": 47.6, "longitude": -122.3, "elevation": 50, "radius": 100,
+         "location_name": "Elm Street", "config_dir": "/config", "external_url": "https://x.example"},
+        "Solar", hide_location=False)
+    assert public == {"latitude": 47.6, "longitude": -122.3, "elevation": 50, "radius": 100,
+                      "location_name": "Solar", "config_dir": "", "external_url": None}

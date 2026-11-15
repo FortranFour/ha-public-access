@@ -237,11 +237,22 @@ _CONFIG_BLANK: dict[str, Any] = {
 }
 
 
-def public_core_config(config: dict[str, Any], location_name: str | None = None) -> dict[str, Any]:
+_LOCATION_KEYS = frozenset({"latitude", "longitude", "elevation", "radius"})
+
+
+def public_core_config(
+    config: dict[str, Any], location_name: str | None = None, hide_location: bool = True
+) -> dict[str, Any]:
     """Home Assistant's core configuration without the home's coordinates,
-    addresses and folders. The installation's name becomes the public title."""
+    addresses and folders. The installation's name becomes the public title.
+
+    The coordinates can be left in (``hide_location=False``) for an owner
+    whose published views show the place anyway and have a card that centres
+    on it, such as a weather radar."""
     out = dict(config)
     for key, value in config.items():
+        if key in _LOCATION_KEYS and not hide_location:
+            continue
         if key in _CONFIG_BLANK:
             out[key] = _CONFIG_BLANK[key]
         elif key.endswith(("_dir", "_dirs", "_url", "_urls")):

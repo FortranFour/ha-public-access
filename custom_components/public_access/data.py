@@ -229,3 +229,30 @@ async def async_fetch_own_json(hass: HomeAssistant, signed_path: str) -> Any | N
     except Exception:  # noqa: BLE001 - a missing description is not worth a failed page
         _LOGGER.debug("Could not read from Home Assistant's own interface", exc_info=True)
     return None
+
+
+async def async_uix_foundries(hass: HomeAssistant) -> dict[str, Any] | None:
+    """UIX's foundries (shared card definitions), as UIX hands them to its
+    frontend; None when UIX is not installed.
+
+    Read through UIX's own helper when it is loaded, which also reads its
+    foundry files; otherwise the ones stored in its options.
+    """
+    try:
+        entries = hass.config_entries.async_entries("uix")
+        if not entries:
+            return None
+        options = entries[0].options
+        stored = dict(options.get("foundries") or {})
+        files = list(options.get("foundry_files") or [])
+        import sys
+
+        helpers = sys.modules.get("custom_components.uix.helpers")
+        reader = getattr(helpers, "get_all_foundries", None)
+        if reader is None:
+            return stored
+        result = await hass.async_add_executor_job(reader, hass, stored, files)
+        return result if isinstance(result, dict) else stored
+    except Exception:  # noqa: BLE001 - another integration's data: assume nothing
+        _LOGGER.debug("Could not read UIX's foundries", exc_info=True)
+        return {}

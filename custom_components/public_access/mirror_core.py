@@ -82,8 +82,10 @@ def head_script(public_path: str) -> str:
         # the public endpoint instead, which answers only for what is
         # published. Sent to Home Assistant itself it would arrive with the
         # fake token and count as a failed login. A link that already carries
-        # its own permission (token= or authSig=) is left alone.
+        # its own permission (token= or authSig=, map tiles) is left alone.
         "try{var h=new URL(u,origin);if(h.origin===origin&&h.pathname.indexOf('/api/')===0"
+        # Map tiles carry their own token, in a header.
+        "&&h.pathname.indexOf('/api/map_tiles/')!==0"
         "&&!h.searchParams.has('token')&&!h.searchParams.has('authSig')){"
         f"h.pathname={json.dumps('/' + public_path)}+h.pathname;"
         "var a=Array.prototype.slice.call(arguments);a[0]=typeof i==='string'?h.toString():new Request(h.toString(),i);"

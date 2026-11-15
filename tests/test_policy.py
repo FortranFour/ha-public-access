@@ -222,7 +222,11 @@ def test_only_a_template_written_in_a_view_is_trusted_as_it_is():
     "{{ area_entities('kitchen') }}",
     "{{ area_devices('kitchen') }}",
     "{{ label_entities('x') }} {{ floor_entities('y') }}",
+    "{{ label_devices('x') }}",
+    "{{ floor_areas('y') | map('area_entities') | list }}",
     "{{ device_entities('abc') }}",
+    "{{ 'abc' | device_entities }}",
+    "{{ distance (47.6, -122.3) }}",
     "{{ device_attr('abc', 'name') }} {{ device_id('sensor.pv') }}",
     "{{ config_entry_attr('abc', 'title') }}",
     "{{ issues() }}",
@@ -292,3 +296,113 @@ def test_a_streams_description_loses_where_it_comes_from_and_who_watches():
         "note": "",
     }
     assert "10.0.4.109" not in str(policy.clean_stream_info(info))
+
+
+def test_an_entity_or_a_word_named_like_such_a_function_is_no_concern():
+    """`sensor.unavailable_entities` is an entity, not the listing of entities."""
+    made = access()
+    for template in (
+        "{{ states('sensor.unavailable_entities') }}",
+        "{{ states.sensor.device_id.state }} {{ state_attr('sensor.pv', 'device_id') }}",
+        "{% set distance = 3 %}{{ distance }} {{ 'closest' }} {{ x.issues }}",
+        "N/A - {% set e = states('sensor.unavailable_entities') | int(0) %}{{ e }} {{ 'Entity' if e == 1 else 'Entities' }}",
+    ):
+        assert made.template_trust(template) == "checked", template
+
+
+# -- what UIX composes from the owner's text -------------------------------------------
+
+BODY = "{{ 'lit' if is_state(e, 'on') else 'dark' }}"
+TAIL = "{{ label }} {{ onoff('light.porch') }} {{ states.lock | list }}"
+WRITTEN = {BODY, TAIL, "{% do returns(1) %}", "tools.jinja", "{{ pre }} badge"}
+MACRO = "{% macro onoff(e) %}" + BODY + "{% endmacro %}\n"
+BILLET = '{%- set label = "Kitchen is" -%}\n'
+
+
+def test_macros_and_values_in_front_of_the_owners_template_are_the_owners():
+    for template in (
+        MACRO + BILLET + TAIL,
+        BILLET + TAIL,
+        MACRO + TAIL,
+        "{% macro macro_c(a = 1, b = \"x\", returns) %}{% do returns(1) %}{% endmacro %}\n{% set c = macro_c | as_function %}\n" + TAIL,
+        "{% from 'tools.jinja' import helper %}\n" + TAIL,
+        '{%- set d = {"a": [1, 2.5, true, none, "x -%} y"]} -%}\n{%- set e = "it\\"s" -%}\n' + TAIL,
+    ):
+        assert policy.composed_of_written(template, WRITTEN), template
+        assert access(strings=WRITTEN).template_trust(template) == "written"
+
+
+@pytest.mark.parametrize("template", [
+    TAIL,                                                                 # nothing composed: plain lookup decides
+    MACRO + BILLET + "{{ states('lock.safe') }}",                         # an ending the owner did not write
+    MACRO + BILLET + TAIL + "{{ states('lock.safe') }}",
+    "{% macro onoff(e) %}{{ states('lock.safe') }}{% endmacro %}\n" + TAIL,  # a body the owner did not write
+    "{% macro onoff(e = states('lock.safe')) %}" + BODY + "{% endmacro %}\n" + TAIL,
+    '{%- set label = states("lock.safe") -%}\n' + TAIL,                   # a value that is not a plain value
+    '{%- set label = "x" ~ states("lock.safe") -%}\n' + TAIL,
+    '{%- set label = "{{ 1 }}" -%}\n' + TAIL,
+    "{{ states('lock.safe') }}" + BILLET + TAIL,                          # something in front
+    BILLET + "{{ states('lock.safe') }}\n" + TAIL,                        # something in between
+    BILLET.rstrip("\n") + TAIL,                                           # not how UIX joins them
+    "{% from 'secrets.jinja' import helper %}\n" + TAIL,                  # a file the owner did not name
+    "{% set label = 'x' %}\n" + TAIL,                                     # not UIX's wording
+])
+def test_anything_else_around_it_is_not(template):
+    assert not policy.composed_of_written(template, WRITTEN)
+
+
+def test_foundries_are_taken_only_when_a_view_names_them():
+    foundries = {
+        "badge": {"forge": {"mold": "badge"}, "element": {"name": "{{ a }}"}, "foundry": "base"},
+        "base": {"forge": {"macros": {}}, "element": {"entity": "sensor.pv"}},
+        "unused": {"element": {"content": "the alarm code"}},
+    }
+    used = policy.foundries_used(foundries, {"badge", "custom:uix-forge", "something"})
+    assert set(used) == {"badge", "base"}, "named in a view, and named by one already taken"
+    assert policy.foundries_used(foundries, {"nothing"}) == {}
+
+
+def test_uix_sends_a_visitor_only_the_foundries_in_use():
+    made = access(foundries={"badge"})
+    sent = made.uix_payload({"result": {"foundries": {"badge": {"a": 1}, "unused": {"b": 2}}, "version": "9"}})
+    assert sent == {"result": {"foundries": {"badge": {"a": 1}}, "version": "9"}}
+    assert made.uix_payload({"foundries": {"badge": 1, "unused": 2}}) == {"foundries": {"badge": 1}}
+    everything = {"result": {"foundries": {"x": 1}}}
+    assert access(foundries=None).uix_payload(everything) == everything, "UIX could not be asked: nothing held back"
+
+
+# -- LLM Vision ------------------------------------------------------------------------
+
+
+def test_the_timeline_is_read_only_where_its_card_is_published():
+    path = "/api/llmvision/timeline/events?limit=5"
+    assert not access().llmvision_events_allowed(path)
+    made = access(strings={"custom:llmvision-card"})
+    assert made.llmvision_events_allowed(path) and made.llmvision_events_allowed("/api/llmvision/timeline/events")
+    assert not made.path_allowed(path), "served filtered, never signed"
+    for other in ("/api/llmvision/timeline/event/1", "/api/llmvision/settings", "https://x/api/llmvision/timeline/events", None):
+        assert not made.llmvision_events_allowed(other), other
+
+
+def test_the_timeline_holds_published_cameras_and_their_pictures_only():
+    made = access()
+    timeline = {"events": [
+        {"uid": "1", "camera_name": "camera.front", "key_frame": "/media/llmvision/snapshots/a.jpg"},
+        {"uid": "2", "camera_name": "camera.bedroom", "key_frame": "/media/llmvision/snapshots/b.jpg"},
+        {"uid": "3", "camera_name": "", "key_frame": "/media/llmvision/snapshots/c.jpg"},
+        {"uid": "4", "camera_name": "camera.front", "key_frame": "/media/../secrets.yaml"},
+        "junk",
+    ]}
+    assert [e["uid"] for e in made.llmvision_events(timeline)["events"]] == ["1", "4"]
+    assert made.media_allowed("media-source://media_source/local/llmvision/snapshots/a.jpg")
+    assert not made.media_allowed("media-source://media_source/local/llmvision/snapshots/b.jpg")
+    assert not made.media_allowed("media-source://media_source/local/llmvision/snapshots/c.jpg")
+    assert not made.media_allowed("media-source://media_source/local/../secrets.yaml")
+    assert made.llmvision_events(None) == {"events": []}
+
+
+def test_the_media_memory_is_bounded():
+    memory = policy.MediaMemory(size=2)
+    for name in ("a", "b", "c", None, ""):
+        memory.note(name)
+    assert len(memory) == 2 and "a" not in memory and "c" in memory

@@ -48,6 +48,7 @@
           "title": "Public title",
           "public_path": "Public path (the part after your Home Assistant address)",
           "noindex": "Ask search engines not to index it",
+          "hide_location": "Keep the home's coordinates from visitors",
           "camera_streams": "Let visitors start live camera streams",
           "frigate_cameras": "Frigate cameras visitors may browse",
           "frame_ancestors": "Allowed embedding origins (CSP frame-ancestors)",
@@ -57,7 +58,8 @@
           "support_views": "For cards that reuse something from another tab: reference cards, popups, a 3D floor plan whose popups show cards kept elsewhere. A supporting view has no tab, but a visitor who looks for it can read it, so it must hold nothing private.",
           "title": "Shown in the browser tab instead of the dashboard's own name and your home's name. Empty: the dashboard's name.",
           "camera_streams": "Only for cameras on a published view. Off: those cameras show still pictures.",
-          "frigate_cameras": "Events, snapshots, clips and recordings of these cameras can be opened by cards on the published views. Cameras whose camera entity or name is on a published view are included without being listed here; every other camera stays closed."
+          "frigate_cameras": "Events, snapshots, clips and recordings of these cameras can be opened by cards on the published views. Cameras whose camera entity or name is on a published view are included without being listed here; every other camera stays closed.",
+          "hide_location": "Home Assistant's frontend is normally told where the home is. On: visitors' browsers get 0, 0 instead. A card that centres on the home (a weather radar) then shows the wrong place; switch this off if your published views show where the home is anyway."
         }
       }
     },

@@ -246,6 +246,20 @@ class PublicDashboardView(HomeAssistantView):
                 response = self._json(clean_stream_info(info))
             response.headers["Cache-Control"] = "no-store"
             return response
+        if access.llmvision_events_allowed(path):
+            # Fetched here and passed on filtered: the timeline holds every
+            # camera's events, and a visitor gets the published cameras'.
+            _, token = await mirror.async_get_viewer(self.hass)
+            signed = async_sign_path(
+                self.hass, path, timedelta(seconds=30), refresh_token_id=token.id
+            )
+            timeline = await ha_data.async_fetch_own_json(self.hass, signed)
+            if timeline is None:
+                response = self._json({"message": "Not available"}, status=502)
+            else:
+                response = self._json(access.llmvision_events(timeline))
+            response.headers["Cache-Control"] = "no-store"
+            return response
         if not access.path_allowed(path):
             self._coordinator.note_refusal(
                 f"Request not served for a visitor (not published): {path[:200]}"

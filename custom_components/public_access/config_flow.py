@@ -33,6 +33,7 @@ from .const import (
     CONF_ENABLED,
     CONF_FRAME_ANCESTORS,
     CONF_FRIGATE_CAMERAS,
+    CONF_HIDE_LOCATION,
     CONF_LOADING_BACKGROUND,
     CONF_NOINDEX,
     CONF_PUBLIC_PATH,
@@ -332,6 +333,9 @@ class PublicAccessOptionsFlow(OptionsFlow):
             ): str,
             vol.Required(
                 CONF_NOINDEX, default=current.get(CONF_NOINDEX, DEFAULT_NOINDEX)
+            ): bool,
+            vol.Required(
+                CONF_HIDE_LOCATION, default=current.get(CONF_HIDE_LOCATION, True)
             ): bool,
             vol.Required(
                 CONF_CAMERA_STREAMS, default=current.get(CONF_CAMERA_STREAMS, True)

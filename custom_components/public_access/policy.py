@@ -46,10 +46,85 @@ MAX_CHECKED_TEMPLATE_LENGTH = 32768
 # devices by area, floor, label, device or integration, device and config
 # entry details, repair issues, and distances (measured from the home, they
 # would locate it).
-_UNWATCHABLE = re.compile(
-    r"\b(?:\w+_entities|\w+_devices|device_attr|is_device_attr|device_id|device_name"
-    r"|config_entry_\w+|issues?|is_hidden_entity|distance|closest)\b"
+_UNWATCHABLE_NAMES = (
+    r"(?:integration|device|area|floor|label)_entities|(?:area|label)_devices"
+    r"|(?:floor|label)_areas|device_attr|is_device_attr|device_id|device_name"
+    r"|config_entry_id|config_entry_attr|issues?|is_hidden_entity|distance|closest"
 )
+# The name as a function call, or as a filter after a pipe. Not as part of an
+# entity id ("sensor.unavailable_entities") or as a plain word in a string.
+_UNWATCHABLE = re.compile(
+    rf"(?<![.\w])(?:{_UNWATCHABLE_NAMES})\s*\(|\|\s*(?:{_UNWATCHABLE_NAMES})\b"
+)
+
+# How UIX puts a template together in the browser: the macros it needs, the
+# values ("billets") it uses, then the template itself. Each piece is checked
+# against what the owner wrote; see composed_of_written.
+_UIX_MACRO = re.compile(r"\{% macro (\w+)\(([^)%{}]*)\) %\}")
+_UIX_END_MACRO = "{% endmacro %}"
+_UIX_AS_FUNCTION = re.compile(r"\n\{% set (\w+) = macro_(\w+) \| as_function %\}")
+_UIX_IMPORT = re.compile(r"\{% from '([^'{}%]*)' import \w+ %\}")
+_UIX_BILLET = re.compile(r"\{%- set \w+ = ")
+_UIX_BILLET_END = " -%}"
+# A value and nothing else: text in quotes, numbers, true/false/none, lists
+# and dictionaries of those. No name, no call, nothing that reads anything.
+_LITERAL = re.compile(
+    r"""(?:\s|[\[\]{}(),:]|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|none|True|False|None)\b"""
+    r"""|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')*"""
+)
+_PARAM = re.compile(r"\w+(?: = .+)?")
+
+
+def _is_literal(text: str) -> bool:
+    return "{{" not in text and "{%" not in text and _LITERAL.fullmatch(text) is not None
+
+
+def composed_of_written(template: str, written: set[str]) -> bool:
+    """Is this template what UIX makes of pieces the owner wrote?
+
+    UIX Forge does not send a card's template as it is written. It puts in
+    front of it the macros the template uses (``{% macro name(a) %}...{%
+    endmacro %}``) and the values it uses (``{%- set name = "value" -%}``).
+    The whole is the owner's if every part is: each macro's body and the
+    template at the end must be text the owner wrote, and everything in
+    between must be exactly the wrapping UIX generates, around plain values.
+    Anything else in there — one extra expression — and this says no.
+    """
+    rest = template
+    for _ in range(200):  # more macros and values than any card has
+        macro = _UIX_MACRO.match(rest)
+        if macro:
+            for param in (p.strip() for p in macro.group(2).split(",") if p.strip()):
+                if not _PARAM.fullmatch(param):
+                    return False
+                if " = " in param and not _is_literal(param.split(" = ", 1)[1]):
+                    return False
+            body_start = macro.end()
+            end = rest.find(_UIX_END_MACRO, body_start)
+            while end >= 0 and rest[body_start:end] not in written:
+                end = rest.find(_UIX_END_MACRO, end + 1)
+            if end < 0:
+                return False
+            rest = rest[end + len(_UIX_END_MACRO):]
+            wrapped = _UIX_AS_FUNCTION.match(rest)
+            if wrapped and wrapped.group(1) == wrapped.group(2) and macro.group(1) == "macro_" + wrapped.group(1):
+                rest = rest[wrapped.end():]
+        elif (imported := _UIX_IMPORT.match(rest)) and imported.group(1) in written:
+            rest = rest[imported.end():]
+        elif billet := _UIX_BILLET.match(rest):
+            end = rest.find(_UIX_BILLET_END, billet.end())
+            while end >= 0 and not _is_literal(rest[billet.end():end]):
+                end = rest.find(_UIX_BILLET_END, end + 1)
+            if end < 0:
+                return False
+            rest = rest[end + len(_UIX_BILLET_END):]
+        else:
+            break
+        if not rest.startswith("\n"):
+            return False
+        rest = rest[1:]
+    return rest != template and rest in written
+
 
 FRIGATE_KINDS = frozenset(
     {
@@ -110,6 +185,30 @@ class EventMemory:
         return len(self._events)
 
 
+class MediaMemory:
+    """Media already listed to a visitor (the pictures of LLM Vision's
+    timeline events), so that exactly those can be opened. Bounded like
+    EventMemory, and kept across connections for the same reason."""
+
+    def __init__(self, size: int = MAX_REMEMBERED_EVENTS) -> None:
+        self._size = size
+        self._ids: OrderedDict[str, None] = OrderedDict()
+
+    def note(self, media_content_id: Any) -> None:
+        if not isinstance(media_content_id, str) or not media_content_id:
+            return
+        self._ids[media_content_id] = None
+        self._ids.move_to_end(media_content_id)
+        while len(self._ids) > self._size:
+            self._ids.popitem(last=False)
+
+    def __contains__(self, media_content_id: Any) -> bool:
+        return media_content_id in self._ids
+
+    def __len__(self) -> int:
+        return len(self._ids)
+
+
 @dataclass
 class FrigateAccess:
     """Which Frigate cameras are published."""
@@ -156,6 +255,11 @@ class Access:
     devices: set[str] = field(default_factory=set)
     camera_streams: bool = True
     frigate: FrigateAccess | None = None
+    # UIX foundries (shared card definitions) the published views use; None
+    # when UIX is not there to ask, and then nothing is held back.
+    foundries: set[str] | None = None
+    media: MediaMemory = field(default_factory=MediaMemory)
+    hide_location: bool = True
 
     def entity_allowed(self, entity_id: Any) -> bool:
         return isinstance(entity_id, str) and entity_id in self.entities
@@ -165,8 +269,9 @@ class Access:
     def template_trust(self, template: Any) -> str | None:
         """How a template a visitor's page asks to render is treated.
 
-        ``"written"``: its text is in a published view word for word, so the
-        owner wrote it for this page; it is rendered as it is.
+        ``"written"``: its text is in a published view word for word (or in a
+        UIX foundry such a view uses, or it is what UIX composes from such
+        text), so the owner wrote it for this page; it is rendered as it is.
 
         ``"checked"``: some card put it together in the browser. It may be
         rendered, but only under watch: Home Assistant reports which entities
@@ -179,7 +284,11 @@ class Access:
             return None
         if template in self.strings:
             return "written"
-        if len(template) > MAX_CHECKED_TEMPLATE_LENGTH or _UNWATCHABLE.search(template):
+        if len(template) > MAX_CHECKED_TEMPLATE_LENGTH:
+            return None
+        if composed_of_written(template, self.strings):
+            return "written"
+        if _UNWATCHABLE.search(template):
             return None
         return "checked"
 
@@ -207,7 +316,7 @@ class Access:
         published view, or if it is a published camera or image entity."""
         if not isinstance(media_content_id, str):
             return False
-        if media_content_id in self.strings:
+        if media_content_id in self.strings or media_content_id in self.media:
             return True
         for prefix in ("media-source://camera/", "media-source://image/"):
             if media_content_id.startswith(prefix):
@@ -304,6 +413,51 @@ class Access:
         # The rest of go2rtc's own API can describe stream sources, camera
         # logins included: never.
         return False
+
+    # -- LLM Vision -----------------------------------------------------------
+
+    def llmvision_events_allowed(self, raw: Any) -> bool:
+        """LLM Vision's timeline (``/api/llmvision/timeline/events``), which
+        its cards read over REST: only when such a card is on a published
+        view, and then only through the public endpoint, which leaves out
+        events of cameras that are not published (``llmvision_events``)."""
+        if not isinstance(raw, str):
+            return False
+        parts = urlsplit(raw)
+        if parts.scheme or parts.netloc or parts.fragment:
+            return False
+        if parts.path.rstrip("/") != "/api/llmvision/timeline/events":
+            return False
+        return any(value.startswith("custom:llmvision-") for value in self.strings)
+
+    def llmvision_events(self, payload: Any) -> dict[str, Any]:
+        """The timeline as a visitor gets it: events of published cameras,
+        whose pictures are remembered so they can be opened."""
+        events = payload.get("events") if isinstance(payload, dict) else None
+        kept = []
+        for event in events if isinstance(events, list) else []:
+            if not isinstance(event, dict) or not self.entity_allowed(event.get("camera_name")):
+                continue
+            kept.append(event)
+            frame = event.get("key_frame")
+            if isinstance(frame, str) and frame.startswith("/media/") and ".." not in frame:
+                self.media.note(frame.replace("/media/", "media-source://media_source/local/", 1))
+        return {**(payload if isinstance(payload, dict) else {}), "events": kept}
+
+    # -- UIX ------------------------------------------------------------------
+
+    def uix_payload(self, payload: Any) -> Any:
+        """What UIX sends its frontend, with the foundries cut down to the
+        ones the published views use. Foundries are the owner's shared card
+        definitions for every dashboard; the rest are not this page's."""
+        if self.foundries is None or not isinstance(payload, dict):
+            return payload
+        out = dict(payload)
+        if isinstance(out.get("foundries"), dict):
+            out["foundries"] = {k: v for k, v in out["foundries"].items() if k in self.foundries}
+        if isinstance(out.get("result"), dict):
+            out["result"] = self.uix_payload(out["result"])
+        return out
 
     def stream_info_allowed(self, raw: Any) -> bool:
         """Is this the description of one published live stream
@@ -461,3 +615,32 @@ def clean_stream_info(data: Any) -> Any:
     if isinstance(data, str) and "://" in data:
         return ""
     return data
+
+
+def foundries_used(foundries: dict[str, Any], strings: Iterable[str]) -> dict[str, Any]:
+    """The UIX foundries the published views use: those named in a view, and
+    those named in turn by a foundry already taken."""
+    used: dict[str, Any] = {}
+    pending = [name for name in set(strings) if name in foundries]
+    while pending:
+        name = pending.pop()
+        if name in used:
+            continue
+        used[name] = foundries[name]
+        pending.extend(n for n in _strings_of(foundries[name]) if n in foundries and n not in used)
+    return used
+
+
+def _strings_of(node: Any) -> set[str]:
+    found: set[str] = set()
+    stack = [node]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, str):
+            if value:
+                found.add(value)
+        elif isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
+    return found

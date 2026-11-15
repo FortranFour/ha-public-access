@@ -77,6 +77,7 @@ ALLOWED_TYPES: frozenset[str] = frozenset(
         "frontend/subscribe_system_data",  # frontend feature flags, nothing private
         "frontend/get_icons",
         "brands/access_token",  # lets the frontend fetch integration logos
+        "map_tiles/access_token",  # lets map cards fetch their background tiles
         "labs/subscribe",  # experimental-feature flags
         # Deliberately absent: repairs/list_issues and persistent_notification/*
         # would leak the owner's repair issues and notifications.
@@ -340,7 +341,11 @@ class MirrorSession:
             elif kind == "config/device_registry/list" and isinstance(result, list):
                 message["result"] = public_devices(result, self._access.devices)
             elif kind == "get_config" and isinstance(result, dict):
-                message["result"] = public_core_config(result, self._title)
+                message["result"] = public_core_config(
+                    result, self._title, self._access.hide_location
+                )
+            elif kind == "uix/get_foundries" and isinstance(result, dict):
+                message["result"] = self._access.uix_payload(result)
             elif kind in STATISTIC_LIST_TYPES and isinstance(result, list):
                 message["result"] = [
                     s for s in result
@@ -379,6 +384,8 @@ class MirrorSession:
                 # The frontend reads the (filtered) configuration again; the
                 # changed values themselves, location included, are not sent.
                 event["data"] = {}
+        elif message.get("type") == "event" and kind == "uix/connect":
+            message["event"] = self._access.uix_payload(message.get("event"))
         elif message.get("type") == "event" and kind in FRIGATE_PUSH_TYPES:
             checked = self._access.frigate_event(message.get("event"))
             if checked is None:
@@ -429,6 +436,28 @@ class MirrorSession:
             "type": "event",
             "event": {"error": "Read-only public view: this template reads what is not published", "level": "ERROR"},
         }
+
+    def _unpublished_entities_in(self, variables: Any) -> list[str]:
+        """Entities named in a template's variables that exist and are not
+        published. A string that only looks like an entity id is no concern."""
+        found: set[str] = set()
+        stack, seen = [variables], 0
+        while stack and seen < 5000:
+            seen += 1
+            value = stack.pop()
+            if isinstance(value, str):
+                if (
+                    "." in value
+                    and len(value) < 256
+                    and not self._entity_allowed(value)
+                    and self._hass.states.get(value) is not None
+                ):
+                    found.add(value)
+            elif isinstance(value, dict):
+                stack.extend(value.values())
+            elif isinstance(value, list):
+                stack.extend(value)
+        return sorted(found)
 
     def _end_subscription(self, msg_id: int) -> None:
         """Stop a forwarded subscription from this side."""
@@ -633,6 +662,16 @@ class MirrorSession:
         elif kind == "lovelace/config":
             msg = {**msg, "url_path": self._dashboard}
         elif kind == "render_template":
+            outside = self._unpublished_entities_in(msg.get("variables"))
+            if outside:
+                # A template the owner wrote for one entity ("{{ states(entity)
+                # }}") must not be pointed at another by the visitor.
+                self._note(
+                    "Template not rendered for a visitor: its variables name "
+                    + ", ".join(outside[:8]) + ", not on a published view."
+                )
+                self._refuse(msg_id, kind, "(variables name unpublished entities)")
+                return
             trust = self._access.template_trust(msg.get("template"))
             if trust is None:
                 self._note(

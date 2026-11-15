@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections import deque
 import logging
+import re
 import time
 from typing import Any
 
@@ -23,13 +24,21 @@ from .const import (
     CONF_CAMERA_STREAMS,
     CONF_DASHBOARD,
     CONF_FRIGATE_CAMERAS,
+    CONF_HIDE_LOCATION,
     CONF_PUBLIC_PATH,
     CONF_SHOW_TABS,
     CONF_SUPPORT_VIEWS,
     CONF_TITLE,
     CONF_VIEWS,
 )
-from .policy import Access, EventMemory, FrigateAccess, frigate_cameras_in
+from .policy import (
+    Access,
+    EventMemory,
+    FrigateAccess,
+    MediaMemory,
+    foundries_used,
+    frigate_cameras_in,
+)
 from .sanitize import (
     collect_strings,
     configured_views,
@@ -39,6 +48,10 @@ from .sanitize import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# A card type that draws from the energy settings: Home Assistant's own
+# energy-* and power-* cards, and custom flow and sankey cards.
+_ENERGY_CARD = re.compile(r"^(?:custom:)?[\w-]*(?:energy|power-flow|power-sources|power-sankey|sankey)[\w-]*$")
 
 # How long the worked-out access is reused. Short: an entity that appears in
 # Home Assistant after a restart is picked up without anyone doing anything.
@@ -55,6 +68,7 @@ class PublicDashboardCoordinator:
         # this instead and answers 404 once the entry is gone.
         self.active = True
         self._frigate_events = EventMemory()
+        self._listed_media = MediaMemory()
         self._access: Access | None = None
         self._access_at = 0.0
         # What visitors' pages asked for and did not get, for the owner's
@@ -159,13 +173,29 @@ class PublicDashboardCoordinator:
         if not sent["views"]:
             return Access(camera_streams=False)
         entities, statistics, candidates = referenced_ids(plain)
-        # Entity ids inside templates count only if such an entity exists.
-        entities |= {c for c in candidates if self.hass.states.get(c) is not None}
         # ... and a template is also allowed in the form the visitor's
         # frontend holds it, with the dashboard's address replaced.
         strings = collect_strings(plain) | collect_strings(sent)
+        # UIX foundries are card definitions kept outside the dashboard. The
+        # ones a sent view uses are part of that view: their text and their
+        # entities count as written there.
+        foundries = await ha_data.async_uix_foundries(self.hass)
+        used = foundries_used(foundries, strings) if foundries is not None else None
+        if used:
+            in_foundries = referenced_ids(used)
+            entities |= in_foundries[0]
+            statistics |= in_foundries[1]
+            candidates |= in_foundries[2]
+            strings |= collect_strings(used)
+        # Entity ids inside templates count only if such an entity exists.
+        entities |= {c for c in candidates if self.hass.states.get(c) is not None}
         prefs = await ha_data.async_energy_prefs(self.hass)
-        statistics |= ha_data.energy_statistic_ids(prefs)
+        energy = ha_data.energy_statistic_ids(prefs)
+        statistics |= energy
+        if any(_ENERGY_CARD.match(value) for value in strings):
+            # Energy and power cards name no entities: they draw what the
+            # energy settings list, and need those sensors' live values too.
+            entities |= {e for e in energy if self.hass.states.get(e) is not None}
         # Statistics of plain sensors share the entity id.
         statistics |= entities
         return Access(
@@ -175,6 +205,9 @@ class PublicDashboardCoordinator:
             devices=ha_data.device_ids(self.hass, entities),
             camera_streams=bool(self.options.get(CONF_CAMERA_STREAMS, True)),
             frigate=self._frigate_access(entities, strings),
+            foundries=set(used) if used is not None else None,
+            media=self._listed_media,
+            hide_location=bool(self.options.get(CONF_HIDE_LOCATION, True)),
         )
 
     def _frigate_access(self, entities: set[str], strings: set[str]) -> FrigateAccess | None:
@@ -218,6 +251,8 @@ class PublicDashboardCoordinator:
             "live_camera_streams": access.camera_streams,
             "frigate_cameras": sorted(access.frigate.cameras) if access.frigate else "(Frigate not found)",
             "frigate_events_remembered": len(self._frigate_events),
+            "uix_foundries": sorted(access.foundries) if access.foundries is not None else "(UIX not found)",
+            "home_location_hidden": access.hide_location,
             # If a card stays empty on the public page, the reason is usually here.
             "recently_refused": list(self._refusals),
         }

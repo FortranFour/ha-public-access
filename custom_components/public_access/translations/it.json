@@ -48,6 +48,7 @@
           "title": "Titolo pubblico",
           "public_path": "Percorso pubblico (la parte dopo l’indirizzo del tuo Home Assistant)",
           "noindex": "Chiedi ai motori di ricerca di non indicizzarla",
+          "hide_location": "Non comunicare ai visitatori le coordinate della casa",
           "camera_streams": "Consenti ai visitatori di avviare i flussi video dal vivo",
           "frigate_cameras": "Telecamere Frigate che i visitatori possono sfogliare",
           "frame_ancestors": "Origini autorizzate all'incorporamento (CSP frame-ancestors)",
@@ -57,7 +58,8 @@
           "support_views": "Per le card che riusano qualcosa da un'altra scheda: card di riferimento, popup, una planimetria 3D i cui popup mostrano card tenute altrove. Una vista di supporto non ha una scheda, ma un visitatore che la cerca può leggerla: non deve contenere nulla di privato.",
           "title": "Mostrato nella scheda del browser al posto del nome della dashboard e del nome della tua casa. Vuoto: il nome della dashboard.",
           "camera_streams": "Solo per le telecamere presenti in una vista pubblicata. Disattivato: quelle telecamere mostrano immagini fisse.",
-          "frigate_cameras": "Eventi, istantanee, clip e registrazioni di queste telecamere possono essere aperti dalle card delle viste pubblicate. Le telecamere la cui entità o il cui nome compare in una vista pubblicata sono incluse senza elencarle qui; tutte le altre restano chiuse."
+          "frigate_cameras": "Eventi, istantanee, clip e registrazioni di queste telecamere possono essere aperti dalle card delle viste pubblicate. Le telecamere la cui entità o il cui nome compare in una vista pubblicata sono incluse senza elencarle qui; tutte le altre restano chiuse.",
+          "hide_location": "Normalmente il frontend di Home Assistant riceve la posizione della casa. Attivo: i browser dei visitatori ricevono 0, 0. Una card centrata sulla casa (un radar meteo) mostra allora il posto sbagliato; disattivalo se le viste pubblicate mostrano comunque dove si trova la casa."
         }
       }
     },
