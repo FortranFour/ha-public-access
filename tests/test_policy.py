@@ -203,3 +203,92 @@ def test_the_event_memory_is_bounded():
 
 def test_camera_names_written_in_a_view_are_found():
     assert policy.frigate_cameras_in({"front", "Front", "light.porch"}, {"front", "attic"}) == {"front"}
+
+
+# -- templates -------------------------------------------------------------------------
+
+
+def test_only_a_template_written_in_a_view_is_trusted_as_it_is():
+    made = access(strings={"{{ states('lock.safe') }}", "{{ area_entities('kitchen') }}"})
+    assert made.template_trust("{{ states('lock.safe') }}") == "written"
+    assert made.template_trust("{{ area_entities('kitchen') }}") == "written", "the owner may write anything"
+    assert made.template_trust("{{ states('sensor.pv') }}") == "checked"
+    assert made.template_trust("{% set a = 1 %}{{ states('lock.safe') }}") == "checked"
+
+
+@pytest.mark.parametrize("template", [
+    "{{ integration_entities('hue') }}",
+    "{{ 'hue' | integration_entities }}",
+    "{{ area_entities('kitchen') }}",
+    "{{ area_devices('kitchen') }}",
+    "{{ label_entities('x') }} {{ floor_entities('y') }}",
+    "{{ device_entities('abc') }}",
+    "{{ device_attr('abc', 'name') }} {{ device_id('sensor.pv') }}",
+    "{{ config_entry_attr('abc', 'title') }}",
+    "{{ issues() }}",
+    "{{ distance(47.6, -122.3) }}",
+    "{{ closest(states.person) }}",
+    "x" * 40000,
+    None,
+    ["{{ 1 }}"],
+])
+def test_an_assembled_template_may_not_list_or_locate_what_is_not_published(template):
+    assert access().template_trust(template) is None
+
+
+def test_what_a_watched_template_read_must_be_published():
+    made = access()
+    read = lambda **kw: {"all": False, "domains": [], "entities": [], "time": False, **kw}
+    assert made.template_reads_allowed(read())
+    assert made.template_reads_allowed(read(entities=["sensor.pv"], time=True))
+    assert made.template_reads_allowed(read(entities={"sensor.pv", "camera.front"})), "Home Assistant hands over sets"
+    assert not made.template_reads_allowed(read(entities={"sensor.pv", "lock.safe"}))
+    assert not made.template_reads_allowed(read(domains={"light"}))
+    assert not made.template_reads_allowed(read(all=True))
+    assert not made.template_reads_allowed(None)
+    assert not made.template_reads_allowed(read(entities="sensor.pv"))
+
+
+# -- live streams as camera cards ask for them ------------------------------------------
+
+
+def test_an_address_is_reduced_to_the_path_that_gets_signed():
+    assert policy.local_path("https://home.example.com/api/x?src=a") == "/api/x?src=a"
+    assert policy.local_path("wss://home.example.com:8123/api/x") == "/api/x"
+    assert policy.local_path("/api/x?src=a") == "/api/x?src=a"
+    assert policy.local_path("javascript://home/api/x") == "javascript://home/api/x", "left alone, then refused"
+    assert not access().path_allowed(policy.local_path("javascript://home/api/camera_proxy/camera.front"))
+    assert access().path_allowed(policy.local_path("http://192.168.1.2:8123/api/camera_proxy/camera.front"))
+    assert not access().path_allowed(policy.local_path("http://192.168.1.2:8123/api/states"))
+    assert policy.local_path(None) is None
+
+
+def test_a_streams_description_is_only_for_published_streams_and_never_signed():
+    made = access()
+    for path in ("/api/frigate/frigate/go2rtc/streams/front", "/api/frigate/go2rtc/streams/front-door",
+                 "/api/frigate/frigate/go2rtc/streams/front_sub"):
+        assert made.stream_info_allowed(path), path
+        assert not made.path_allowed(path), "served cleaned, never signed"
+    for path in ("/api/frigate/frigate/go2rtc/streams/bedroom", "/api/frigate/frigate/go2rtc/streams",
+                 "/api/frigate/frigate/go2rtc/streams/front/extra", "/api/frigate/frigate/go2rtc/streams/front?x=1",
+                 "/api/frigate/frigate/go2rtc/api/streams", "/api/frigate/elsewhere/go2rtc/streams/front",
+                 "/api/frigate/frigate/go2rtc/streams/../streams/front", None):
+        assert not made.stream_info_allowed(path), path
+    assert not access(camera_streams=False).stream_info_allowed("/api/frigate/frigate/go2rtc/streams/front")
+
+
+def test_a_streams_description_loses_where_it_comes_from_and_who_watches():
+    info = {
+        "producers": [{"url": "rtsp://*:*@10.0.4.109:554/Streaming/Channels/101", "remote_addr": "10.0.4.109:554",
+                       "medias": ["video, recvonly, H264", "audio, recvonly, PCMA/8000"],
+                       "receivers": [{"codec": {"codec_name": "h264"}, "bytes": 5}]}],
+        "consumers": [{"remote_addr": "192.168.0.50:51234", "user_agent": "Mozilla", "medias": ["video, sendonly, H264"]}],
+        "note": "from rtsp://10.0.4.109/x",
+    }
+    assert policy.clean_stream_info(info) == {
+        "producers": [{"medias": ["video, recvonly, H264", "audio, recvonly, PCMA/8000"],
+                       "receivers": [{"codec": {"codec_name": "h264"}, "bytes": 5}]}],
+        "consumers": [{"medias": ["video, sendonly, H264"]}],
+        "note": "",
+    }
+    assert "10.0.4.109" not in str(policy.clean_stream_info(info))

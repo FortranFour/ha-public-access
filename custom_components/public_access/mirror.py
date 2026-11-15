@@ -40,7 +40,7 @@ from homeassistant.auth.models import RefreshToken, User
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
-from .policy import MAX_SIGN_SECONDS, Access
+from .policy import CHECKED_TEMPLATE_SECONDS, MAX_SIGN_SECONDS, Access, local_path
 from .sanitize import pin_default_panel, public_core_config, public_devices
 
 _LOGGER = logging.getLogger(__name__)
@@ -92,10 +92,19 @@ ALLOWED_TYPES: frozenset[str] = frozenset(
         "lovelace/dashboards/list",  # answered here: only the published dashboard exists
         "lovelace/info",  # resource mode; the frontend asks at boot
         "lovelace/resources",  # custom cards need their JavaScript
-        # render_template is allowed ONLY for a template string that appears
-        # verbatim in a published view (the markdown card renders its content
-        # through it). Anything else could read every state and is refused.
+        # render_template as it is for a template string that appears verbatim
+        # in a published view (the markdown card renders its content through
+        # it). A template some card assembled in the browser is rendered under
+        # watch: its result is passed on only if it read published entities
+        # and nothing else (policy.Access.template_trust). Anything else
+        # could read every state and is refused.
         "render_template",
+        # UIX (UI eXtension): its frontend waits for this subscription before
+        # it draws anything it forges (cards, badges, rows), and receives its
+        # shared templates ("foundries") through it. Its messages that change
+        # something (uix/set_foundry and the like) stay refused.
+        "uix/connect",
+        "uix/get_foundries",
         "energy/get_prefs",
         "energy/info",
         "energy/validate",
@@ -191,6 +200,7 @@ STATISTIC_LIST_TYPES: frozenset[str] = frozenset(
 QUIET_TYPES: dict[str, Any] = {
     "persistent_notification/subscribe": None,
     "repairs/list_issues": {"issues": []},
+    "uix/log": None,  # a card's note for the owner's log: dropped
 }
 
 _connections = 0
@@ -242,6 +252,7 @@ class MirrorSession:
         access: Access,
         publish: Callable[[dict[str, Any]], dict[str, Any]],
         title: str | None = None,
+        note: Callable[[str], None] | None = None,
         core: Any,
     ) -> None:
         from homeassistant.components.websocket_api.connection import ActiveConnection
@@ -259,7 +270,11 @@ class MirrorSession:
         self._templates = access.strings
         self._publish = publish
         self._title = title
+        self._note = note or (lambda _what: None)
         self._types: dict[int, str] = {}
+        # render_template subscriptions whose results are checked before
+        # they are passed on, with their text for the owner's diagnostics.
+        self._watched: dict[int, str] = {}
         # The frontend glue, called only after this class's own filters.
         self._core = core.Session(public_path=public_path, dashboard=dashboard)
         self._loop = hass.loop
@@ -293,6 +308,8 @@ class MirrorSession:
             # message. These surface in the page as unhandled rejections.
             _LOGGER.debug("Mirror: HA answered %s with %s", kind, message.get("error"))
             return message
+        if msg_id in self._watched and message.get("type") == "event":
+            return self._watched_template_event(msg_id, message)
         if kind in FRONTEND_DATA_TYPES:
             # Results for get_*, events for subscribe_*: both carry the data.
             pin_default_panel(message.get("result"), self._public_path)
@@ -372,6 +389,56 @@ class MirrorSession:
             if isinstance(event, dict) and isinstance(event.get("events"), list):
                 event["events"] = [self._logbook_entry(e) for e in event["events"] if isinstance(e, dict)]
         return message
+
+    def _watched_template_event(self, msg_id: int, message: dict[str, Any]) -> dict[str, Any]:
+        """A result of a template that was not written in a published view.
+
+        Home Assistant says with every result which entities the template
+        read. If all of them are published the result goes to the visitor.
+        If not, the result is withheld, the subscription is ended, and the
+        page is told the template failed."""
+        event = message.get("event")
+        if not isinstance(event, dict) or "result" not in event:
+            return message  # a template error, reported as Home Assistant words it
+        listeners = event.get("listeners")
+        if self._access.template_reads_allowed(listeners):
+            # Home Assistant hands these over as sets; a list is what the page
+            # gets from Home Assistant itself.
+            event["listeners"] = {
+                key: sorted(value) if isinstance(value, (set, frozenset)) else value
+                for key, value in listeners.items()
+            }
+            return message
+        read = listeners if isinstance(listeners, dict) else {}
+        outside = sorted(
+            e for e in read.get("entities") or [] if not self._entity_allowed(e)
+        )
+        if read.get("all"):
+            why = "it goes through every entity"
+        elif read.get("domains"):
+            why = "it goes through every entity of " + ", ".join(sorted(read["domains"]))
+        elif outside:
+            why = "it reads " + ", ".join(outside[:8]) + ", not on a published view"
+        else:
+            why = "Home Assistant did not say what it read"
+        self._note(f"Template not rendered for a visitor: {why}. Template: {self._watched[msg_id][:300]}")
+        _LOGGER.debug("Mirror withheld a template result (%s)", why)
+        self._end_subscription(msg_id)
+        return {
+            "id": msg_id,
+            "type": "event",
+            "event": {"error": "Read-only public view: this template reads what is not published", "level": "ERROR"},
+        }
+
+    def _end_subscription(self, msg_id: int) -> None:
+        """Stop a forwarded subscription from this side."""
+        self._watched.pop(msg_id, None)
+        unsubscribe = self._connection.subscriptions.pop(msg_id, None)
+        if unsubscribe is not None:
+            try:
+                unsubscribe()
+            except Exception:  # noqa: BLE001 - ending it must not end the visit
+                _LOGGER.debug("Could not end subscription %s", msg_id, exc_info=True)
 
     def _entity_allowed(self, entity_id: Any) -> bool:
         if self._entities is None:
@@ -460,6 +527,8 @@ class MirrorSession:
             )
             return
 
+        if kind == "unsubscribe_events":
+            self._watched.pop(msg.get("subscription"), None)
         answered, result = self._core.local_answer(kind, msg)
         if answered:
             self._reply_ok(msg_id, result)
@@ -532,7 +601,16 @@ class MirrorSession:
                     self._refuse(msg_id, kind, "(live streams are switched off)")
                     return
         elif kind == "auth/sign_path":
-            if not self._access.path_allowed(msg.get("path")):
+            path = local_path(msg.get("path"))
+            msg = {**msg, "path": path}
+            if self._access.stream_info_allowed(path):
+                # A stream's description names the camera's address at home,
+                # so the page is pointed at the public endpoint, which serves
+                # a cleaned copy, rather than given a link to the original.
+                self._reply_ok(msg_id, {"path": f"/{self._public_path}{path}"})
+                return
+            if not self._access.path_allowed(path):
+                self._note(f"Link not signed for a visitor (not published): {str(path)[:200]}")
                 self._refuse(msg_id, kind, "(path not published)")
                 return
             expires = msg.get("expires")
@@ -545,15 +623,36 @@ class MirrorSession:
         elif kind.startswith("frigate/"):
             checked = self._access.frigate_request(kind, msg)
             if checked is None:
+                self._note(
+                    f"Frigate request not passed on for a visitor (camera not published): {kind}"
+                    f" {msg.get('camera') or msg.get('cameras') or ''}"
+                )
                 self._refuse(msg_id, kind, "(Frigate camera not published)")
                 return
             msg = checked
         elif kind == "lovelace/config":
             msg = {**msg, "url_path": self._dashboard}
         elif kind == "render_template":
-            if msg.get("template") not in self._templates:
+            trust = self._access.template_trust(msg.get("template"))
+            if trust is None:
+                self._note(
+                    "Template not rendered for a visitor: it is not written in a published view"
+                    " and uses a function that lists or locates what is not published."
+                    f" Template: {str(msg.get('template'))[:300]}"
+                )
                 self._refuse(msg_id, kind, "(not from a published view)")
                 return
+            if trust == "checked":
+                # Rendered under watch (see _watched_template_event), and
+                # with a limit on how long it may take.
+                given = msg.get("timeout")
+                limit = (
+                    min(given, CHECKED_TEMPLATE_SECONDS)
+                    if isinstance(given, (int, float)) and given > 0
+                    else CHECKED_TEMPLATE_SECONDS
+                )
+                msg = {**msg, "timeout": limit}
+                self._watched[msg_id] = msg["template"]
 
         self._types[msg_id] = kind
         self._connection.async_handle(self._core.inbound(kind, msg))
@@ -571,6 +670,7 @@ async def async_serve_websocket(
     access: Access,
     publish: Callable[[dict[str, Any]], dict[str, Any]],
     title: str | None = None,
+    note: Callable[[str], None] | None = None,
 ) -> web.WebSocketResponse:
     """The public websocket endpoint."""
     global _connections  # noqa: PLW0603
@@ -604,7 +704,7 @@ async def async_serve_websocket(
     session = MirrorSession(
         hass, ws, user, token, request.remote,
         public_path=public_path, dashboard=dashboard, access=access,
-        publish=publish, title=title, core=core,
+        publish=publish, title=title, note=note, core=core,
     )
     _connections += 1
     try:

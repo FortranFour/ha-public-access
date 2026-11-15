@@ -36,6 +36,21 @@ MAX_SIGN_SECONDS = 3600
 
 MAX_REMEMBERED_EVENTS = 20000
 
+# A template that is not written in a published view word for word (a card
+# assembled it: macros put in front, a reference filled in) is rendered only
+# under watch. It gets this long to render...
+CHECKED_TEMPLATE_SECONDS = 5
+MAX_CHECKED_TEMPLATE_LENGTH = 32768
+# ... and may not use what reads the house without reading an entity's state,
+# which is the one thing the watch below cannot see: lists of entities and
+# devices by area, floor, label, device or integration, device and config
+# entry details, repair issues, and distances (measured from the home, they
+# would locate it).
+_UNWATCHABLE = re.compile(
+    r"\b(?:\w+_entities|\w+_devices|device_attr|is_device_attr|device_id|device_name"
+    r"|config_entry_\w+|issues?|is_hidden_entity|distance|closest)\b"
+)
+
 FRIGATE_KINDS = frozenset(
     {
         "thumbnail", "snapshot", "notifications", "clips", "recording", "preview",
@@ -49,6 +64,22 @@ ENTITY_PROXIES = {
     "image_proxy": "image.",
     "calendars": "calendar.",
 }
+
+
+def local_path(raw: Any) -> Any:
+    """A path to sign, without the address in front of it.
+
+    Some cards ask for a whole address to be signed
+    (``https://home.example.com/api/...``). Home Assistant signs the path
+    and the query and ignores the rest, so the rest is dropped here, before
+    the path is checked: what is checked is then exactly what is signed.
+    """
+    if not isinstance(raw, str):
+        return raw
+    parts = urlsplit(raw)
+    if parts.scheme in ("http", "https", "ws", "wss") and parts.netloc and not parts.fragment:
+        return parts.path + ("?" + parts.query if parts.query else "")
+    return raw
 
 
 class EventMemory:
@@ -128,6 +159,46 @@ class Access:
 
     def entity_allowed(self, entity_id: Any) -> bool:
         return isinstance(entity_id, str) and entity_id in self.entities
+
+    # -- templates ------------------------------------------------------------
+
+    def template_trust(self, template: Any) -> str | None:
+        """How a template a visitor's page asks to render is treated.
+
+        ``"written"``: its text is in a published view word for word, so the
+        owner wrote it for this page; it is rendered as it is.
+
+        ``"checked"``: some card put it together in the browser. It may be
+        rendered, but only under watch: Home Assistant reports which entities
+        a template read, and the result is passed on only if every one of them
+        is published (``template_reads_allowed``).
+
+        ``None``: not rendered at all.
+        """
+        if not isinstance(template, str):
+            return None
+        if template in self.strings:
+            return "written"
+        if len(template) > MAX_CHECKED_TEMPLATE_LENGTH or _UNWATCHABLE.search(template):
+            return None
+        return "checked"
+
+    def template_reads_allowed(self, listeners: Any) -> bool:
+        """Did a watched template read published entities and nothing else?
+
+        ``listeners`` is what Home Assistant sends with every rendered result:
+        the entities the template read, whether it went through a whole domain
+        or through every state. A walk through a domain or through everything
+        reads entities that are not published, so it fails, and so does a
+        result that says nothing about what it read."""
+        if not isinstance(listeners, dict):
+            return False
+        if listeners.get("all") or listeners.get("domains"):
+            return False
+        entities = listeners.get("entities") or ()
+        return isinstance(entities, (list, tuple, set, frozenset)) and all(
+            self.entity_allowed(e) for e in entities
+        )
 
     # -- media ---------------------------------------------------------------
 
@@ -233,6 +304,32 @@ class Access:
         # The rest of go2rtc's own API can describe stream sources, camera
         # logins included: never.
         return False
+
+    def stream_info_allowed(self, raw: Any) -> bool:
+        """Is this the description of one published live stream
+        (``/api/frigate/<instance>/go2rtc/streams/<stream>``)?
+
+        Camera cards read it to learn whether a stream has sound. It also
+        names where the stream comes from — the camera's address on the home
+        network — so it is never signed for a visitor to fetch directly: the
+        public endpoint fetches it and passes on a cleaned copy
+        (``clean_stream_info``)."""
+        frigate = self.frigate
+        if frigate is None or not isinstance(raw, str) or not self.camera_streams:
+            return False
+        parts = urlsplit(raw)
+        if parts.scheme or parts.netloc or parts.fragment or parts.query:
+            return False
+        path = unquote(parts.path) if "%" in parts.path else parts.path
+        if not _SAFE_PATH.match(path) or "//" in path or ".." in path:
+            return False
+        segments = path.split("/")[1:]
+        if segments[:2] != ["api", "frigate"]:
+            return False
+        rest = segments[2:]
+        if rest and rest[0] in frigate.instances:
+            rest = rest[1:]
+        return len(rest) == 3 and rest[:2] == ["go2rtc", "streams"] and self._stream_allowed(rest[2])
 
     def _stream_allowed(self, name: str | None) -> bool:
         """A live stream by name. Streams are usually named after their
@@ -342,3 +439,25 @@ def _strip_extension(name: str) -> str:
 def frigate_cameras_in(strings: Iterable[str], known: set[str]) -> set[str]:
     """Frigate camera names written in the published views."""
     return {value for value in strings if value in known}
+
+
+_STREAM_PRIVATE_KEYS = frozenset({"url", "remote_addr", "user_agent", "source", "sdp"})
+
+
+def clean_stream_info(data: Any) -> Any:
+    """go2rtc's description of a stream without where it comes from or who is
+    watching: no source addresses (camera logins are already masked by
+    Frigate, the camera's address on the home network is not), no viewers'
+    addresses. What cards need — which video and audio tracks there are —
+    stays."""
+    if isinstance(data, dict):
+        return {
+            key: clean_stream_info(value)
+            for key, value in data.items()
+            if key not in _STREAM_PRIVATE_KEYS
+        }
+    if isinstance(data, list):
+        return [clean_stream_info(item) for item in data]
+    if isinstance(data, str) and "://" in data:
+        return ""
+    return data

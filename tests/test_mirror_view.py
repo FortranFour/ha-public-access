@@ -92,6 +92,7 @@ class _Wire:
 
     def __init__(self):
         self.answers, self.forwarded = [], []
+        self.subscriptions, self.ended = {}, []
 
     def send_str(self, text):
         self.answers.append(json.loads(text))
@@ -111,7 +112,8 @@ def _session(access):
     session._access = access
     session._entities, session._statistics, session._templates = access.entities, access.statistics, access.strings
     session._publish = _coordinator(views=["overview"]).publish
-    session._types = {}
+    session._types, session._watched, session.notes = {}, {}, []
+    session._note = session.notes.append
     session._core = mirror_core.Session(public_path="solar", dashboard="energy-public")
     session._error = lambda msg_id, code, message: {
         "id": msg_id, "type": "result", "success": False, "error": {"code": code, "message": message}}
@@ -150,8 +152,17 @@ def _refused(wire):
     {"type": "frigate/reviews/viewed", "instance_id": "frigate", "ids": ["x"]},
     {"type": "config/entity_registry/update", "entity_id": "light.porch"},
     {"type": "media_source/browse_media"},
-    {"type": "render_template", "template": "{{ states('sensor.secret') }}"},
+    {"type": "render_template", "template": "{{ integration_entities('hue') }}"},
+    {"type": "render_template", "template": "{{ 'kitchen' | area_entities }}"},
+    {"type": "render_template", "template": "{{ distance(47.6, -122.3) }}"},
+    {"type": "render_template", "template": "{{ device_attr('abc', 'name') }}"},
+    {"type": "render_template", "template": {"not": "text"}},
+    {"type": "uix/set_foundry", "name": "x", "config": {}},
+    {"type": "uix/delete_foundry", "name": "x"},
     {"type": "auth/sign_path", "path": "/api/states"},
+    {"type": "auth/sign_path", "path": "https://home.example.com/api/states"},
+    {"type": "auth/sign_path", "path": "https://home.example.com/api/frigate/frigate/mse/api/ws?src=Bedroom"},
+    {"type": "auth/sign_path", "path": "/api/frigate/frigate/go2rtc/api/streams"},
     {"type": "auth/sign_path", "path": "/api/camera_proxy/camera.garage"},
     {"type": "auth/sign_path", "path": "/api/frigate/frigate/thumbnail/1700.2-cd"},
     {"type": "auth/long_lived_access_token", "client_name": "x", "lifespan": 365},
@@ -179,6 +190,8 @@ def test_refused_before_it_reaches_home_assistant(msg):
     {"type": "config/entity_registry/get", "entity_id": "camera.front"},
     {"type": "frigate/recordings/summary", "instance_id": "frigate", "camera": "Front"},
     {"type": "media_source/resolve_media", "media_content_id": "media-source://frigate/frigate/event/clips/Front/1700.1-ab"},
+    {"type": "uix/connect", "browserID": "x"},
+    {"type": "uix/get_foundries"},
 ])
 def test_forwarded_when_it_is_about_something_published(msg):
     _, wire = _ask(**msg)
@@ -283,3 +296,89 @@ def test_edits_to_other_dashboards_are_not_announced():
 def test_the_logbook_does_not_say_who_did_it():
     out = _answer("logbook/get_events", [{"entity_id": "light.porch", "state": "on", "context_user_id": "abc", "context_name": "Marshall"}])
     assert out["result"] == [{"entity_id": "light.porch", "state": "on"}]
+
+
+# -- templates a card put together in the browser ----------------------------------------
+
+COMPOSED = "{% macro onoff(e) %}{{ is_state(e, 'on') }}{% endmacro %}\n{{ onoff('light.porch') }}"
+
+
+def _watched(template=COMPOSED, **extra):
+    session, wire = _ask(type="render_template", template=template, **extra)
+    wire.subscriptions[7] = lambda: wire.ended.append(7)
+    return session, wire
+
+
+def _result(session, entities=(), domains=(), everything=False):
+    return session._filter_outbound({"id": 7, "type": "event", "event": {
+        "result": "x", "listeners": {"all": everything, "entities": set(entities), "domains": set(domains), "time": False}}})
+
+
+def test_a_template_written_in_a_view_is_rendered_as_it_is():
+    session, wire = _ask(type="render_template", template="{{ states('sensor.pv') }}")
+    assert wire.forwarded == [{"id": 7, "type": "render_template", "template": "{{ states('sensor.pv') }}"}]
+    assert not session._watched
+
+
+def test_an_assembled_template_is_rendered_under_watch_and_against_the_clock():
+    session, wire = _watched()
+    assert wire.forwarded[0]["timeout"] == 5 and 7 in session._watched
+    _, wire = _watched(timeout=60)
+    assert wire.forwarded[0]["timeout"] == 5
+    _, wire = _watched(timeout=2)
+    assert wire.forwarded[0]["timeout"] == 2
+
+
+def test_its_result_is_passed_on_when_it_read_only_published_entities():
+    session, wire = _watched()
+    out = _result(session, entities={"light.porch", "sensor.pv"})
+    assert out["event"]["result"] == "x"
+    assert out["event"]["listeners"]["entities"] == ["light.porch", "sensor.pv"], "lists, as Home Assistant sends them"
+    assert not wire.ended and not session.notes
+
+
+@pytest.mark.parametrize("read", [
+    {"entities": {"light.porch", "lock.safe"}},
+    {"domains": {"light"}},
+    {"everything": True},
+])
+def test_its_result_is_withheld_when_it_read_anything_else(read):
+    session, wire = _watched()
+    out = _result(session, **read)
+    assert "result" not in out["event"] and out["event"]["level"] == "ERROR"
+    assert wire.ended == [7], "and the subscription is ended"
+    assert 7 not in session._watched and len(session.notes) == 1
+    assert "lock.safe" in session.notes[0] or "every entity" in session.notes[0]
+
+
+def test_a_result_that_does_not_say_what_it_read_is_withheld():
+    session, wire = _watched()
+    out = session._filter_outbound({"id": 7, "type": "event", "event": {"result": "x"}})
+    assert "result" not in out["event"] and wire.ended == [7]
+
+
+def test_a_template_error_is_passed_on_as_home_assistant_words_it():
+    session, _ = _watched()
+    error = {"id": 7, "type": "event", "event": {"error": "UndefinedError: x", "level": "ERROR"}}
+    assert session._filter_outbound(dict(error)) == error
+
+
+# -- signing for cards that ask in their own ways ------------------------------------------
+
+
+def test_a_whole_address_is_signed_as_its_path():
+    _, wire = _ask(type="auth/sign_path", path="https://home.example.com/api/frigate/frigate/mse/api/ws?src=Front")
+    assert wire.forwarded[0]["path"] == "/api/frigate/frigate/mse/api/ws?src=Front"
+
+
+def test_a_streams_description_is_served_cleaned_never_signed():
+    _, wire = _ask(type="auth/sign_path", path="/api/frigate/frigate/go2rtc/streams/Front")
+    assert not wire.forwarded
+    assert wire.answers[0]["result"] == {"path": "/solar/api/frigate/frigate/go2rtc/streams/Front"}
+    _, wire = _ask(type="auth/sign_path", path="/api/frigate/frigate/go2rtc/streams/Bedroom")
+    assert _refused(wire)
+
+
+def test_a_cards_note_for_the_owners_log_is_dropped():
+    _, wire = _ask(type="uix/log", message="x")
+    assert wire.answers[0]["success"] is True and not wire.forwarded

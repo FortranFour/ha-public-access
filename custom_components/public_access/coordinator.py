@@ -10,6 +10,7 @@ policy.EventMemory).
 
 from __future__ import annotations
 
+from collections import deque
 import logging
 import time
 from typing import Any
@@ -56,6 +57,9 @@ class PublicDashboardCoordinator:
         self._frigate_events = EventMemory()
         self._access: Access | None = None
         self._access_at = 0.0
+        # What visitors' pages asked for and did not get, for the owner's
+        # diagnostics: the latest few, each kind of refusal once.
+        self._refusals: deque[str] = deque(maxlen=40)
 
     # -- configuration ---------------------------------------------------------
 
@@ -87,6 +91,11 @@ class PublicDashboardCoordinator:
     def show_header(self) -> bool:
         """The tab bar is worth showing when there is more than one view."""
         return bool(self.options.get(CONF_SHOW_TABS, True)) and len(self.published_views) > 1
+
+    def note_refusal(self, what: str) -> None:
+        """Remember something a visitor's page asked for and did not get."""
+        if what not in self._refusals:
+            self._refusals.append(what)
 
     def invalidate(self) -> None:
         """Called when the dashboard or the options change: what the views
@@ -209,4 +218,6 @@ class PublicDashboardCoordinator:
             "live_camera_streams": access.camera_streams,
             "frigate_cameras": sorted(access.frigate.cameras) if access.frigate else "(Frigate not found)",
             "frigate_events_remembered": len(self._frigate_events),
+            # If a card stays empty on the public page, the reason is usually here.
+            "recently_refused": list(self._refusals),
         }

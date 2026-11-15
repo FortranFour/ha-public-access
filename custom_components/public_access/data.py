@@ -195,3 +195,37 @@ def frigate_cameras_of(hass: HomeAssistant, entity_ids: set[str]) -> set[str]:
         if isinstance(name, str) and name:
             names.add(name)
     return names
+
+
+async def async_fetch_own_json(hass: HomeAssistant, signed_path: str) -> Any | None:
+    """Read JSON from this Home Assistant's own HTTP interface.
+
+    Used for the one answer that has to be cleaned before a visitor may have
+    it (a live stream's description): the Frigate integration serves it over
+    HTTP only, so it is fetched from here, over the loopback address, with a
+    link signed for the read-only viewer. Returns None when it cannot be read.
+    """
+    try:
+        from aiohttp import ClientTimeout
+
+        from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+        api = hass.config.api
+        if api is None:
+            return None
+        scheme = "https" if api.use_ssl else "http"
+        # A certificate is issued for the public name, not for 127.0.0.1.
+        session = async_get_clientsession(hass, verify_ssl=False)
+        for host in ("127.0.0.1", api.local_ip):
+            try:
+                url = f"{scheme}://{host}:{api.port}{signed_path}"
+                async with session.get(url, timeout=ClientTimeout(total=10)) as response:
+                    if response.status == 200:
+                        return await response.json(content_type=None)
+                    _LOGGER.debug("Own request answered %s", response.status)
+                    return None
+            except OSError:
+                continue  # not listening on this address: try the next
+    except Exception:  # noqa: BLE001 - a missing description is not worth a failed page
+        _LOGGER.debug("Could not read from Home Assistant's own interface", exc_info=True)
+    return None

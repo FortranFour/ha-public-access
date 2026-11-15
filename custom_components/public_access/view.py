@@ -28,7 +28,7 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
-from . import assets, guard
+from . import assets, data as ha_data, guard
 from .const import (
     CONF_CACHE_SECONDS,
     CONF_ENABLED,
@@ -42,6 +42,7 @@ from .const import (
     RATE_LIMIT_PER_MINUTE,
 )
 from .coordinator import PublicDashboardCoordinator
+from .policy import clean_stream_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -211,6 +212,7 @@ class PublicDashboardView(HomeAssistantView):
             access=await coordinator.async_access(),
             publish=coordinator.publish,
             title=coordinator.public_title,
+            note=coordinator.note_refusal,
         )
 
     async def _serve_media(self, request: web.Request, route: str) -> web.StreamResponse:
@@ -230,7 +232,24 @@ class PublicDashboardView(HomeAssistantView):
         if request.query_string:
             path += "?" + request.query_string
         access = await self._coordinator.async_access()
+        if access.stream_info_allowed(path):
+            # Fetched here and passed on cleaned, never handed over as a link:
+            # it names the camera's address on the home network.
+            _, token = await mirror.async_get_viewer(self.hass)
+            signed = async_sign_path(
+                self.hass, path, timedelta(seconds=30), refresh_token_id=token.id
+            )
+            info = await ha_data.async_fetch_own_json(self.hass, signed)
+            if info is None:
+                response = self._json({"message": "Not available"}, status=502)
+            else:
+                response = self._json(clean_stream_info(info))
+            response.headers["Cache-Control"] = "no-store"
+            return response
         if not access.path_allowed(path):
+            self._coordinator.note_refusal(
+                f"Request not served for a visitor (not published): {path[:200]}"
+            )
             response = self._json({"message": "Not found"}, status=404)
             response.headers["Cache-Control"] = "no-store"
             return response

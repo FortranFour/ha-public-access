@@ -22,6 +22,7 @@
 | **Links between views** | A card that navigates to `/your-dashboard/lights` goes to `/your-public-path/lights`. The dashboard's real address and name are replaced before anything is sent; a public title replaces them in the browser tab. Navigation to anything outside the published dashboard is not made. |
 | **Supporting views** | Views that are sent but have no tab, for cards that reuse something kept on another tab: [Dashboard References](https://github.com/FortranFour/dashboard-references) cards, popups, a floor plan whose room panels take their entities from source cards elsewhere. |
 | **3D floor plans** | [floor3dx-card](https://github.com/FortranFour/floor3dx-card) and its rooms card draw as they do for you: templated titles and readouts, room panels, pictures on model surfaces, entities named only inside a template. Other cards of the floor3d family ask Home Assistant for the same things. |
+| **Cards that write their own templates** | [UIX](https://github.com/Lint-Free-Technology/uix) Forge cards, badges and rows (macros and billets, locks), and templates with a [Dashboard References](https://github.com/FortranFour/dashboard-references) token filled in, are rendered as long as they read only published entities. |
 | **Cameras** | Pictures always; live streams (HLS, WebRTC) for cameras on a published view, unless switched off. |
 | **Frigate** | Cards can list events and reviews, show thumbnails and snapshots, play clips and recordings, and open live streams, for published cameras only. Works with the [Advanced Camera Card](https://github.com/dermotduffy/advanced-camera-card) and the [Wildlife Card](https://github.com/FortranFour/wildlife-card). |
 | **Less about your home** | Visitors' browsers no longer receive the home's coordinates and name, folders and addresses of the installation, devices that are not on a published view, or any device's MAC address, serial number and configuration link. Logbook lines do not say who or what caused them. |
@@ -84,7 +85,7 @@ For published cameras, cards can list events and reviews, receive new ones as th
 - a thumbnail, snapshot or clip is served only for an event that was first listed to a visitor that way, so guessing an event id opens nothing;
 - recordings, previews and live streams are checked by camera name;
 - marking a review as seen and keeping an event are changes, and stay refused like every other change;
-- go2rtc's own stream list, which can show camera logins, is never served.
+- go2rtc's own stream list, which can show camera logins, is never served. The description of one published stream, which camera cards read to learn whether it has sound, is served without the camera's address on your network and without who else is watching.
 
 Home Assistant gives every camera and image entity a token in its state, which opens that entity's snapshot (and, for cameras that have one, its MJPEG stream). A visitor's browser needs that token to draw the picture, so it has it; it rotates every few minutes and opens nothing else.
 
@@ -94,7 +95,8 @@ The Frigate integration's notification links (`/api/frigate/notifications/<event
 
 - **Only reading is forwarded.** The visitor's page talks to Public Access, not to Home Assistant, and only messages that *read* are passed on. Commands, saves, scripts and arbitrary templates are refused.
 - **A read-only user underneath.** What is passed on runs as a system user in Home Assistant's own read-only group, so a message that slipped through would be refused by Home Assistant.
-- **Only what the views use.** A visitor can read the entities written in the published and supporting views (as an entity, or inside a template there), their history and logbook, and their devices' names. Templates are rendered only if their text is in those views.
+- **Only what the views use.** A visitor can read the entities written in the published and supporting views (as an entity, or inside a template there), their history and logbook, and their devices' names.
+- **Templates are yours, or watched.** A template is rendered as it is only if its text is in those views, word for word. Some cards assemble a template in the browser instead (UIX Forge puts macros in front, a reference card fills in an entity). Such a template is rendered under watch: Home Assistant reports which entities a template read, and the result reaches the visitor only if every one of them is published. A template that walks through a whole domain or through everything fails that test. One that lists entities or devices by area, label, device or integration, reads device details, or measures a distance from home is not rendered at all, since those read the house without reading any entity. A watched template gets five seconds.
 - **Signed links are checked.** Cards get pictures and video through short-lived signed links. Home Assistant would sign any path for a logged-in user; for a visitor, Public Access signs only a published camera's or image's picture, a published calendar, and Frigate media of published cameras. The rule is in [`policy.py`](custom_components/public_access/policy.py), with its tests in [`tests/test_policy.py`](tests/test_policy.py).
 - **REST requests stay home too.** Anything a card fetches from `/api/…` is steered to the public endpoint, which answers under the same rule and otherwise says "not found". Nothing reaches Home Assistant with the page's placeholder login.
 - **Your own login is untouched.** The public page never writes to the browser storage your Home Assistant uses.
@@ -106,9 +108,11 @@ The [`tests/`](tests) folder holds the automated checks, among them that the int
 
 ## What was tested, and what was not
 
-Tested on Home Assistant 2026.11.1 in headless Chrome, with a dashboard built for the purpose: tab bar and navigation, subviews, references across views, floor3dx-card 2.19.5 and its rooms card, Dashboard References 0.1.0-beta.3, Wildlife Card 1.3.4, Advanced Camera Card 8.2.0, and a list of things a hostile visitor might send.
+Tested on Home Assistant 2026.11.1 in headless Chrome, with a dashboard built for the purpose: tab bar and navigation, subviews, references across views, floor3dx-card 2.19.5 and its rooms card, Dashboard References 0.1.0-beta.3, Wildlife Card 1.3.4, Advanced Camera Card 8.2.0, UIX 9.0.0 (Forge cards and badges, the lock spark), and a list of things a hostile visitor might send.
 
 Frigate was a stand-in that answers like the Frigate integration (same messages, same addresses, canned events), not a Frigate server. So the rules were exercised, and the cards' lists, thumbnails and pushed events worked through them, but **playing a clip or a recording and live video (HLS, WebRTC, go2rtc/MSE) have not been seen working end to end**. Try them on your own installation before relying on them, and please report what you find.
+
+A UIX lock keeps its place on the public page, but a code written in the card is sent to the visitor's browser with the rest of the card, as it is to any of your own users. Nothing behind the lock can be operated from the public page either way; just do not use a code there that opens anything real.
 
 Not supported: cards that pick their entities at run time from everything in Home Assistant (auto-entities, area and strategy dashboards), since only entities written in the views are sent; popups opened by a script or an automation, since those are service calls; Frigate's own web interface.
 
@@ -134,7 +138,8 @@ Live video is another matter: WebRTC needs a route from the visitor to your came
 | **My dashboard is not in the list** | Only dashboards saved at least once can be published. Open it, make any change, save. |
 | **A view is not in the list** | Give it an address: open the view's settings and fill in *URL*. |
 | **A card says it cannot find its source, or a popup is empty** | What it refers to is on a view that is not sent. Add that view under **Supporting views**. |
-| **A card is blank or shows "entity not found"** | Its entity is not written in the view (it is chosen at run time, or comes from another dashboard). Diagnostics list the entities that are open. |
+| **A card is blank, shows "entity not found", a template warning or "could not sign"** | Download diagnostics and look at `recently_refused`: it lists what visitors' pages asked for and did not get, and why (an entity that is not on a published view, a Frigate camera that is not published, a template that reads too much). An entity chosen at run time, or one that comes from another dashboard, is not open; diagnostics list the ones that are. |
+| **Labels in the settings form are raw names (`support_views`, `show_tabs`)** | Home Assistant is still holding the previous version's texts. Restart it. |
 | **A Frigate card shows no events** | Its cameras are not published: list them under **Frigate cameras visitors may browse**. |
 | **The page loads forever** | Reload with the cache cleared (Ctrl/Cmd + Shift + R). |
 
