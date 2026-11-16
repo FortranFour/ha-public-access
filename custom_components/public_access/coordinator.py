@@ -11,6 +11,7 @@ policy.EventMemory).
 from __future__ import annotations
 
 from collections import deque
+from datetime import datetime
 import logging
 import re
 import time
@@ -23,8 +24,14 @@ from . import data as ha_data
 from .const import (
     CONF_CAMERA_STREAMS,
     CONF_DASHBOARD,
+    CONF_ENABLED,
+    CONF_ENERGY,
+    CONF_EXPIRES_AT,
     CONF_FRIGATE_CAMERAS,
+    CONF_FRIGATE_UI,
     CONF_HIDE_LOCATION,
+    CONF_MORE,
+    CONF_NAME,
     CONF_PUBLIC_PATH,
     CONF_SHOW_TABS,
     CONF_SUPPORT_VIEWS,
@@ -40,12 +47,15 @@ from .policy import (
     frigate_cameras_in,
 )
 from .sanitize import (
+    ALL_VIEWS,
+    Panel,
     collect_conditions,
     collect_strings,
     configured_views,
     has_published_view,
     publish_config,
     referenced_ids,
+    sub_path,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -79,6 +89,9 @@ class PublicDashboardCoordinator:
         # what visitors' pages reported going wrong in them.
         self._refused_types: dict[str, int] = {}
         self._page_errors: deque[str] = deque(maxlen=40)
+        # Every socket open to a visitor of this link (the page's own, live
+        # streams). Closed when the link is revoked, expires or changes.
+        self.sockets: set[Any] = set()
 
     # -- configuration ---------------------------------------------------------
 
@@ -95,6 +108,86 @@ class PublicDashboardCoordinator:
         return self.options.get(CONF_PUBLIC_PATH) or ""
 
     @property
+    def name(self) -> str:
+        """Who the link is for, in the owner's words."""
+        return (self.options.get(CONF_NAME) or "").strip()
+
+    @property
+    def expires_at(self) -> datetime | None:
+        """When the link stops working by itself, or None: never."""
+        from homeassistant.util import dt as dt_util
+
+        raw = self.options.get(CONF_EXPIRES_AT)
+        if not raw:
+            return None
+        parsed = dt_util.parse_datetime(str(raw))
+        if parsed is None:
+            return None
+        return dt_util.as_utc(parsed if parsed.tzinfo else parsed.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE))
+
+    @property
+    def expired(self) -> bool:
+        from homeassistant.util import dt as dt_util
+
+        expires = self.expires_at
+        return expires is not None and dt_util.utcnow() >= expires
+
+    @property
+    def live(self) -> bool:
+        """Does the link work right now? Not once it is removed, switched
+        off (revoked) or past its date."""
+        return self.active and bool(self.options.get(CONF_ENABLED, True)) and not self.expired
+
+    async def async_close_sockets(self) -> None:
+        """Hang up on everyone using this link."""
+        for socket in list(self.sockets):
+            try:
+                await socket.close()
+            except Exception:  # noqa: BLE001 - already gone
+                pass
+        self.sockets.clear()
+
+    @property
+    def panels(self) -> list[Panel]:
+        """Everything this link shows, the main dashboard first. Each panel
+        has its own public address: the link's, or the link's with a suffix."""
+        main = Panel(
+            path=self.public_path,
+            dashboard=self.dashboard,
+            title=self.public_title,
+            views=tuple(self.published_views),
+            support=tuple(self.support_views),
+        )
+        out = [main]
+        taken = {main.path}
+        for item in self.options.get(CONF_MORE) or []:
+            if not isinstance(item, dict) or not item.get("dashboard"):
+                continue
+            if item["dashboard"] in {p.dashboard for p in out}:
+                continue
+            path = str(item.get("path") or "")
+            if not path.startswith(self.public_path + "_") or path in taken:
+                path = sub_path(self.public_path, item.get("title") or item["dashboard"], taken)
+            taken.add(path)
+            views = tuple(str(v) for v in item.get("views") or []) or (ALL_VIEWS,)
+            out.append(Panel(path=path, dashboard=str(item["dashboard"]),
+                             title=(item.get("title") or None), views=views))
+        if self.options.get(CONF_ENERGY):
+            out.append(Panel(path=sub_path(self.public_path, "energy", taken), kind="energy", dashboard="energy"))
+            taken.add(out[-1].path)
+        if self.options.get(CONF_FRIGATE_UI):
+            out.append(Panel(path=sub_path(self.public_path, "frigate", taken), kind="frigate", title="Frigate"))
+        return out
+
+    @property
+    def paths(self) -> dict[str, str]:
+        """Real address -> public address, for every panel that has both."""
+        return {p.dashboard: p.path for p in self.panels if p.dashboard}
+
+    def panel_at(self, path: str) -> Panel | None:
+        return next((p for p in self.panels if p.path == path), None)
+
+    @property
     def published_views(self) -> list[str]:
         return configured_views(self.options, CONF_VIEWS)
 
@@ -108,7 +201,11 @@ class PublicDashboardCoordinator:
 
     @property
     def show_header(self) -> bool:
-        """The tab bar is worth showing when there is more than one view."""
+        """The tab bar is worth showing when there is more than one view, and
+        has to stay when there is more than one panel: its menu button is how
+        a phone opens the sidebar."""
+        if len(self.panels) > 1:
+            return True
         return bool(self.options.get(CONF_SHOW_TABS, True)) and len(self.published_views) > 1
 
     def note_refusal(self, what: str) -> None:
@@ -135,21 +232,25 @@ class PublicDashboardCoordinator:
 
     # -- what a visitor receives -------------------------------------------------
 
-    def publish(self, config: dict[str, Any]) -> dict[str, Any]:
-        """The dashboard cut down to the chosen views, under its public name."""
+    def publish(self, config: dict[str, Any], dashboard: str | None = None) -> dict[str, Any]:
+        """One of the link's dashboards (the main one unless named) cut down
+        to its chosen views, under its public name."""
+        panel = next(
+            (p for p in self.panels if p.kind == "dashboard" and p.dashboard == dashboard),
+            self.panels[0],
+        )
         published = publish_config(
             config,
-            published=self.published_views,
-            support=self.support_views,
-            dashboard=self.dashboard,
-            public_path=self.public_path,
-            title=self.public_title,
+            published=panel.views,
+            support=panel.support,
+            title=panel.title,
+            paths=self.paths,
         )
-        if not has_published_view(config, self.published_views):
+        if not has_published_view(config, panel.views):
             _LOGGER.warning(
                 "None of the published views %s is in dashboard %r (views: %s); publishing nothing",
-                self.published_views,
-                self.dashboard,
+                list(panel.views),
+                panel.dashboard,
                 ", ".join(str(v.get("path")) for v in config.get("views") or [] if isinstance(v, dict))
                 or "none",
             )
@@ -157,7 +258,7 @@ class PublicDashboardCoordinator:
         return published
 
     async def async_published_config(self) -> dict[str, Any] | None:
-        """The published dashboard, or None when it has no saved configuration."""
+        """The published main dashboard, or None when it has no saved configuration."""
         config = await ha_data.async_load_dashboard_config(self.hass, self.dashboard) if self.dashboard else None
         return self.publish(config) if config else None
 
@@ -179,21 +280,36 @@ class PublicDashboardCoordinator:
         included, so their entities must be readable — but nothing outside the
         sent views is.
         """
-        dashboard = self.dashboard
-        raw = await ha_data.async_load_dashboard_config(self.hass, dashboard) if dashboard else None
-        if not raw:
+        entities: set[str] = set()
+        statistics: set[str] = set()
+        candidates: set[str] = set()
+        strings: set[str] = set()
+        conditions: set[str] = set()
+        anything = False
+        for panel in self.panels:
+            if panel.kind != "dashboard" or not panel.dashboard:
+                continue
+            raw = await ha_data.async_load_dashboard_config(self.hass, panel.dashboard)
+            if not raw:
+                continue
+            # Scanned without the address rewrite: an entity or a template is
+            # allowed as the owner wrote it...
+            plain = publish_config(raw, published=panel.views, support=panel.support)
+            sent = self.publish(raw, panel.dashboard)
+            if not sent["views"]:
+                continue
+            anything = True
+            found = referenced_ids(plain)
+            entities |= found[0]
+            statistics |= found[1]
+            candidates |= found[2]
+            # ... and a template is also allowed in the form the visitor's
+            # frontend holds it, with the dashboard's address replaced.
+            strings |= collect_strings(plain) | collect_strings(sent)
+            conditions |= collect_conditions(plain) | collect_conditions(sent)
+        energy_panel = any(p.kind == "energy" for p in self.panels)
+        if not anything and not energy_panel and not any(p.kind == "frigate" for p in self.panels):
             return Access(camera_streams=False)
-        # Scanned without the address rewrite: an entity or a template is
-        # allowed as the owner wrote it...
-        plain = publish_config(raw, published=self.published_views, support=self.support_views)
-        sent = self.publish(raw)
-        if not sent["views"]:
-            return Access(camera_streams=False)
-        entities, statistics, candidates = referenced_ids(plain)
-        # ... and a template is also allowed in the form the visitor's
-        # frontend holds it, with the dashboard's address replaced.
-        strings = collect_strings(plain) | collect_strings(sent)
-        conditions = collect_conditions(plain) | collect_conditions(sent)
         # UIX foundries are card definitions kept outside the dashboard. The
         # ones a sent view uses are part of that view: their text and their
         # entities count as written there.
@@ -211,7 +327,7 @@ class PublicDashboardCoordinator:
         prefs = await ha_data.async_energy_prefs(self.hass)
         energy = ha_data.energy_statistic_ids(prefs)
         statistics |= energy
-        if any(_ENERGY_CARD.match(value) for value in strings):
+        if energy_panel or any(_ENERGY_CARD.match(value) for value in strings):
             # Energy and power cards name no entities: they draw what the
             # energy settings list, and need those sensors' live values too.
             entities |= {e for e in energy if self.hass.states.get(e) is not None}
@@ -257,7 +373,19 @@ class PublicDashboardCoordinator:
         """What a visitor can reach, for diagnostics. Never served publicly."""
         access = await self.async_access()
         sent = await self.async_published_config() or {"views": []}
+        expires = self.expires_at
         return {
+            "link": {
+                "for": self.name,
+                "working": self.live,
+                "expires_at": expires.isoformat() if expires else None,
+                "expired": self.expired,
+                "open_connections": len(self.sockets),
+                "panels": [
+                    {"address": f"/{p.path}", "kind": p.kind, "dashboard": p.dashboard, "views": list(p.views)}
+                    for p in self.panels
+                ],
+            },
             "dashboard": self.dashboard,
             "views_as_tabs": [
                 str(v.get("path") or "(first view)") for v in sent["views"] if v.get("visible", True) is not False

@@ -47,7 +47,7 @@ from .policy import (
     listen_only_sdp,
     local_path,
 )
-from .sanitize import pin_default_panel, public_core_config, public_devices
+from .sanitize import Panel, pin_default_panel, public_core_config, public_devices
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -84,6 +84,7 @@ ALLOWED_TYPES: frozenset[str] = frozenset(
         "frontend/get_user_data",
         "frontend/subscribe_user_data",  # the viewer's own (empty) preferences
         "frontend/subscribe_system_data",  # frontend feature flags, nothing private
+        "frontend/get_system_data",  # the same, asked once (the Energy dashboard does)
         "frontend/get_icons",
         "brands/access_token",  # lets the frontend fetch integration logos
         "map_tiles/access_token",  # lets map cards fetch their background tiles
@@ -188,7 +189,12 @@ ALLOWED_EVENT_TYPES: frozenset[str] = frozenset(
 # Frontend preference stores. Forwarded, but any default_panel in them is
 # rewritten to the public path (see sanitize.pin_default_panel).
 FRONTEND_DATA_TYPES: frozenset[str] = frozenset(
-    {"frontend/get_user_data", "frontend/subscribe_user_data", "frontend/subscribe_system_data"}
+    {
+        "frontend/get_user_data",
+        "frontend/subscribe_user_data",
+        "frontend/subscribe_system_data",
+        "frontend/get_system_data",
+    }
 )
 
 CAMERA_TYPES: frozenset[str] = frozenset(
@@ -277,6 +283,7 @@ class MirrorSession:
         title: str | None = None,
         notes: Any = None,
         core: Any,
+        panels: list[Panel] | None = None,
     ) -> None:
         from homeassistant.components.websocket_api.connection import ActiveConnection
         from homeassistant.components.websocket_api.messages import (
@@ -293,6 +300,10 @@ class MirrorSession:
         self._templates = access.strings
         self._publish = publish
         self._title = title
+        # Everything the link shows, the main dashboard first.
+        self._site = list(panels or [Panel(path=public_path, dashboard=dashboard, title=title)])
+        # lovelace/config requests in flight: which dashboard each asked for.
+        self._asked: dict[int, str] = {}
         # Where the owner's diagnostics are kept (the coordinator).
         self._notes = notes
         self._note = getattr(notes, "note_refusal", None) or (lambda _what: None)
@@ -386,7 +397,7 @@ class MirrorSession:
             elif kind == "get_panels" and isinstance(result, dict):
                 message["result"] = self._panels(result)
             elif kind == "lovelace/config" and isinstance(result, dict):
-                message["result"] = self._published(result)
+                message["result"] = self._published(result, self._asked.pop(message.get("id"), None))
             elif kind == "auth/current_user" and isinstance(result, dict):
                 result["is_admin"] = False
                 result["is_owner"] = False
@@ -407,9 +418,14 @@ class MirrorSession:
             if event.get("event_type") == "lovelace_updated":
                 # Only the published dashboard exists for the visitor, under
                 # its public name; edits to any other are nobody's business.
-                if data.get("url_path") != self._dashboard:
+                changed = next(
+                    (p for p in self._panels_of_site()
+                     if p.kind == "dashboard" and p.dashboard == data.get("url_path")),
+                    None,
+                )
+                if changed is None:
                     return None
-                event["data"] = {**data, "url_path": self._public_path}
+                event["data"] = {**data, "url_path": changed.path}
             elif event.get("event_type") == "core_config_updated":
                 # The frontend reads the (filtered) configuration again; the
                 # changed values themselves, location included, are not sent.
@@ -510,32 +526,53 @@ class MirrorSession:
         and automations are not the visitor's business."""
         return {k: v for k, v in entry.items() if not k.startswith("context_")}
 
+    def _panels_of_site(self) -> list[Panel]:
+        site = getattr(self, "_site", None)
+        return site or [Panel(path=self._public_path, dashboard=self._dashboard, title=self._title)]
+
     def _panels(self, panels: dict[str, Any]) -> dict[str, Any]:
-        """Only one panel exists for the visitor: the published dashboard, under
-        the public path. The frontend then asks for lovelace/config with that
-        url_path, which is rewritten back to the real dashboard."""
-        source = panels.get(self._dashboard) or {}
+        """The panels that exist for the visitor: what the link publishes,
+        each under its public address, and nothing else of the owner's
+        sidebar. The frontend asks for lovelace/config with a public address,
+        which is turned back into the real dashboard's."""
+        out: dict[str, Any] = {}
+        for item in self._panels_of_site():
+            source = panels.get(item.dashboard) or {} if item.dashboard else {}
+            if item.kind == "energy":
+                if not source:
+                    continue  # the Energy dashboard is not set up
+                out[item.path] = {**source, "url_path": item.path, "require_admin": False}
+            elif item.kind == "frigate":
+                out[item.path] = {
+                    "component_name": "iframe",
+                    "icon": "mdi:cctv",
+                    "title": item.title or "Frigate",
+                    "config": {"url": f"/{item.path}/ui/"},
+                    "url_path": item.path,
+                    "require_admin": False,
+                    "config_panel_domain": None,
+                }
+            else:
+                out[item.path] = {
+                    "component_name": "lovelace",
+                    "icon": source.get("icon"),
+                    "title": item.title or source.get("title") or "Dashboard",
+                    "config": {"mode": "storage"},
+                    "url_path": item.path,
+                    "require_admin": False,
+                    "config_panel_domain": None,
+                }
+        return out
 
-        def panel(url_path: str) -> dict[str, Any]:
-            return {
-                "component_name": "lovelace",
-                "icon": source.get("icon"),
-                "title": self._title or source.get("title") or "Dashboard",
-                "config": {"mode": "storage"},
-                "url_path": url_path,
-                "require_admin": False,
-                "config_panel_domain": None,
-            }
-
-        return {self._public_path: panel(self._public_path)}
-
-    def _published(self, config: dict[str, Any]) -> dict[str, Any]:
+    def _published(self, config: dict[str, Any], dashboard: str | None = None) -> dict[str, Any]:
         """Publish exactly the chosen views; the others are not even sent to the
         browser (sanitize.publish_config).
 
         If the configured views are gone (renamed, deleted), publish nothing
         rather than the first view: that one was never chosen and may be private."""
-        return self._publish(config)
+        if dashboard is None or dashboard == self._dashboard:
+            return self._publish(config)
+        return self._publish(config, dashboard)
 
     # -- inbound (visitor -> Home Assistant) ----------------------------------
 
@@ -611,7 +648,17 @@ class MirrorSession:
 
         if kind == "lovelace/dashboards/list":
             # Never forwarded: the owner's other dashboards do not exist here.
-            self._reply_ok(msg_id, self._core.dashboards(self._title))
+            self._reply_ok(msg_id, [
+                {
+                    "id": item.path,
+                    "url_path": item.path,
+                    "title": item.title or "Dashboard",
+                    "mode": "storage",
+                    "show_in_sidebar": len(self._panels_of_site()) > 1,
+                    "require_admin": False,
+                }
+                for item in self._panels_of_site() if item.kind == "dashboard"
+            ])
             return
         if kind == "subscribe_events":
             if msg.get("event_type", "*") not in ALLOWED_EVENT_TYPES:
@@ -722,8 +769,24 @@ class MirrorSession:
                 self._refuse(msg_id, kind, "(Frigate camera not published)")
                 return
             msg = checked
+        elif kind == "frontend/get_system_data":
+            # The frontend's own settings and the Energy dashboard's; other
+            # keys hold the owner's choices for pages a visitor does not have.
+            if msg.get("key") not in ("core", "energy"):
+                self._refuse(msg_id, kind, "(not a visitor's)")
+                return
         elif kind == "lovelace/config":
-            msg = {**msg, "url_path": self._dashboard}
+            # Asked for by public address. Any other name, "lovelace" and no
+            # name at all get the link's main dashboard: whatever is asked,
+            # a dashboard that is not published is never read.
+            wanted = next(
+                (p for p in self._panels_of_site()
+                 if p.kind == "dashboard" and p.path == msg.get("url_path")),
+                None,
+            )
+            real = wanted.dashboard if wanted else self._dashboard
+            self._asked[msg_id] = real
+            msg = {**msg, "url_path": real}
         elif kind == "subscribe_condition":
             condition = msg.get("condition")
             # A state compared with another entity's ("state: input_select.x")
@@ -795,6 +858,7 @@ async def async_serve_websocket(
     publish: Callable[[dict[str, Any]], dict[str, Any]],
     title: str | None = None,
     notes: Any = None,
+    panels: list[Panel] | None = None,
 ) -> web.WebSocketResponse:
     """The public websocket endpoint."""
     global _connections  # noqa: PLW0603
@@ -828,9 +892,13 @@ async def async_serve_websocket(
     session = MirrorSession(
         hass, ws, user, token, request.remote,
         public_path=public_path, dashboard=dashboard, access=access,
-        publish=publish, title=title, notes=notes, core=core,
+        publish=publish, title=title, notes=notes, core=core, panels=panels,
     )
     _connections += 1
+    # The link's own list of open sockets: revoking it hangs up on them.
+    sockets = getattr(notes, "sockets", None)
+    if sockets is not None:
+        sockets.add(ws)
     try:
         async for message in ws:
             if message.type != WSMsgType.TEXT:
@@ -845,6 +913,8 @@ async def async_serve_websocket(
                     session.handle(item)
     finally:
         _connections -= 1
+        if sockets is not None:
+            sockets.discard(ws)
         session.close()
     return ws
 
@@ -854,6 +924,7 @@ async def async_render_page(
     public_path: str,
     loading_background: str | None = None,
     show_header: bool = False,
+    paths: list[str] | None = None,
 ) -> str | None:
     """Home Assistant's own index page, with the page scripts put in place."""
     from homeassistant.components import frontend
@@ -878,4 +949,4 @@ async def async_render_page(
         extra_modules=hass.data[frontend.DATA_EXTRA_MODULE_URL].urls,
         extra_js_es5=hass.data[frontend.DATA_EXTRA_JS_URL_ES5].urls,
     )
-    return core.assemble_page(html, public_path, loading_background, show_header)
+    return core.assemble_page(html, public_path, loading_background, show_header, paths)

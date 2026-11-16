@@ -202,3 +202,36 @@ def test_camera_cards_reach_a_visitor_without_their_talk_button():
     assert second["live"]["microphone"] == {"always_connected": False}
     assert markdown["menu"]["buttons"]["microphone"] == {"enabled": True}, "only camera cards are touched"
     assert card["menu"]["buttons"]["microphone"]["enabled"] is True, "the owner's own configuration is not"
+
+
+def test_a_links_other_panels_get_addresses_of_their_own():
+    taken = {"home"}
+    first = sanitize.sub_path("home", "Guest Suite!", taken)
+    assert first == "home_guest_suite"
+    assert sanitize.sub_path("home", "Guest suite", taken | {first}) == "home_guest_suite_2"
+    assert sanitize.sub_path("home", "É", taken) == "home_more"
+    assert "-" not in sanitize.sub_path("home", "dashboard-guest", taken)
+
+
+def test_every_view_can_be_chosen_at_once():
+    config = {"views": [{"path": "a"}, {"title": "No address"}, {"path": "hidden", "visible": False}]}
+    sent = sanitize.publish_config(config, published={sanitize.ALL_VIEWS})
+    assert [v.get("path") for v in sent["views"]] == ["a", None, "hidden"]
+    assert sent["views"][2]["visible"] is False, "a view the owner hides stays without a tab"
+    assert sanitize.has_published_view(config, {sanitize.ALL_VIEWS})
+
+
+def test_links_between_published_dashboards_keep_working():
+    config = {"views": [{"path": "a", "cards": [
+        {"type": "button", "tap_action": {"action": "navigate", "navigation_path": "/dashboard-guest/rooms"}},
+        {"type": "button", "tap_action": {"action": "navigate", "navigation_path": "/dashboard-guest-2/x"}},
+        {"type": "button", "tap_action": {"action": "navigate", "navigation_path": "/energy"}},
+        {"type": "button", "tap_action": {"action": "navigate", "navigation_path": "/dashboard-private/x"}},
+        {"type": "markdown", "content": "[back](/lovelace/a)"},
+    ]}]}
+    sent = sanitize.publish_config(config, published={"a"}, paths={
+        "lovelace": "home", "dashboard-guest": "home_guest", "dashboard-guest-2": "home_second", "energy": "home_energy"})
+    cards = sent["views"][0]["cards"]
+    assert [c.get("tap_action", {}).get("navigation_path") for c in cards[:4]] == [
+        "/home_guest/rooms", "/home_second/x", "/home_energy", "/dashboard-private/x"]
+    assert cards[4]["content"] == "[back](/home/a)"

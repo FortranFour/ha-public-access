@@ -21,6 +21,7 @@ import asyncio
 import hashlib
 from homeassistant.helpers.json import json_dumps
 import logging
+import re
 import time
 from typing import Any
 
@@ -86,8 +87,11 @@ class PublicDashboardView(HomeAssistantView):
     ) -> None:
         self.hass = hass
         self.public_path = public_path
-        self.url = f"/{public_path}"
-        self.extra_urls = [f"/{public_path}/{{extra:.+}}"]
+        # One route for the link and for its other panels, which live at the
+        # link's address with a suffix ("/home", "/home_energy"). Which of
+        # them exist is decided per request: a route cannot be taken back.
+        self.url = f"/{{site:{re.escape(public_path)}(?:_[a-z0-9_]+)?}}"
+        self.extra_urls = [self.url + "/{extra:.+}"]
         self._coordinator = coordinator
         self._limiter = RateLimiter()
         self._media_limiter = RateLimiter(MEDIA_RATE_LIMIT_PER_MINUTE)
@@ -163,16 +167,25 @@ class PublicDashboardView(HomeAssistantView):
 
     # -- routing ---------------------------------------------------------------
 
-    async def get(self, request: web.Request, extra: str = "") -> web.Response:
+    async def get(self, request: web.Request, site: str = "", extra: str = "") -> web.Response:
         """Dispatch the public GET surface."""
-        if not self._coordinator.active or not self._options.get(CONF_ENABLED, True):
-            # Deliberately indistinguishable from a path that was never configured.
+        panel = self._coordinator.panel_at(site or self.public_path) if self._coordinator.live else None
+        if panel is None:
+            # Deliberately indistinguishable from a path that was never
+            # configured: a link removed, revoked or past its date, or an
+            # address that is none of its panels.
             return web.Response(text="404: Not Found", status=404)
 
         visitor = guard.visitor_address(request)
         self._note_visit(request, visitor)
 
         route = extra.strip("/")
+        if panel.path != self.public_path:
+            # Another panel of the link: the same page at another address.
+            # The page's socket and requests all go to the link's own.
+            if panel.kind == "frigate" and (route == "ui" or route.startswith("ui/")):
+                return await self._serve_frigate(request, panel, extra)
+            route = ""
         media = route.startswith("api/") and not route.startswith("api/history/")
         if not (self._media_limiter if media else self._limiter).allow(visitor):
             response = web.Response(text="429: Too Many Requests", status=429)
@@ -217,6 +230,7 @@ class PublicDashboardView(HomeAssistantView):
             publish=coordinator.publish,
             title=coordinator.public_title,
             notes=coordinator,
+            panels=coordinator.panels,
         )
 
     async def _serve_media(self, request: web.Request, route: str) -> web.StreamResponse:
@@ -318,6 +332,7 @@ class PublicDashboardView(HomeAssistantView):
                 return response
             socket = web.WebSocketResponse(heartbeat=30, max_msg_size=MAX_STREAM_REQUEST)
             await socket.prepare(request)
+            self._coordinator.sockets.add(socket)
 
             async def from_visitor() -> None:
                 async for message in socket:
@@ -353,12 +368,19 @@ class PublicDashboardView(HomeAssistantView):
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+                self._coordinator.sockets.discard(socket)
                 await socket.close()
             return socket
         finally:
             if upstream is not None:
                 await upstream.close()
             self._streams.release(visitor)
+
+    async def _serve_frigate(self, request: web.Request, panel: Any, extra: str) -> web.StreamResponse:
+        """Frigate's own interface, read-only (frigate_ui.py)."""
+        from . import frigate_ui
+
+        return await frigate_ui.async_serve(self, request, panel, extra)
 
     async def _serve_page(self, request: web.Request, route: str) -> web.StreamResponse:
         from . import mirror
@@ -395,6 +417,7 @@ class PublicDashboardView(HomeAssistantView):
             self.public_path,
             options.get(CONF_LOADING_BACKGROUND),
             self._coordinator.show_header,
+            [p.path for p in self._coordinator.panels],
         )
         if html is None:
             # Defensive: the frontend glue ships with the integration.

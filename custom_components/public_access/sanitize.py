@@ -11,8 +11,9 @@ state, and nothing here imports Home Assistant.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 import re
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 # Chosen in the setup form for a first view that has no address of its own.
 FIRST_VIEW = "__first__"
@@ -49,6 +50,39 @@ def configured_views(options: dict[str, Any], key: str = "views") -> list[str]:
     return [str(legacy)] if legacy not in (None, "") else [FIRST_VIEW]
 
 
+# Stands for every view of a dashboard, present and future.
+ALL_VIEWS = "__all__"
+
+
+@dataclass(frozen=True)
+class Panel:
+    """One thing a link shows, as an entry in the visitor's sidebar.
+
+    ``path`` is its public address (the first part of the URL). ``kind`` is
+    "dashboard" (a Lovelace dashboard, ``dashboard`` being its real address),
+    "energy" (Home Assistant's Energy dashboard) or "frigate" (Frigate's own
+    interface, read-only)."""
+
+    path: str
+    kind: str = "dashboard"
+    dashboard: str = ""
+    title: str | None = None
+    views: tuple[str, ...] = ()
+    support: tuple[str, ...] = ()
+
+
+def sub_path(public_path: str, name: str, taken: Iterable[str]) -> str:
+    """The public address of one more panel of a link: the link's own address,
+    an underscore, and the panel's name in plain letters. Never a hyphen: a
+    hyphen-free address cannot be a storage dashboard's."""
+    slug = re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")[:24].strip("_") or "more"
+    taken = set(taken)
+    path, n = f"{public_path}_{slug}", 2
+    while path in taken:
+        path, n = f"{public_path}_{slug}_{n}", n + 1
+    return path
+
+
 def view_selected(view: dict[str, Any], index: int, names: Iterable[str]) -> bool:
     """Is this view one of the chosen ones?
 
@@ -57,7 +91,7 @@ def view_selected(view: dict[str, Any], index: int, names: Iterable[str]) -> boo
     matched by name: an index would move as soon as other views are left out.
     """
     names = set(names)
-    if index == 0 and FIRST_VIEW in names:
+    if ALL_VIEWS in names or (index == 0 and FIRST_VIEW in names):
         return True
     path = view.get("path")
     return path is not None and str(path) != "" and str(path) in names
@@ -71,6 +105,7 @@ def publish_config(
     dashboard: str | None = None,
     public_path: str | None = None,
     title: str | None = None,
+    paths: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """The dashboard as a visitor receives it.
 
@@ -87,7 +122,9 @@ def publish_config(
 
     The dashboard's own address is replaced by the public one wherever it is
     written, so links between views keep working and the real name of the
-    dashboard stays home.
+    dashboard stays home. ``paths`` does the same for every panel of the link
+    (real address -> public address), so a button that opens another
+    published dashboard still does.
     """
     published = set(published)
     support = set(support) - published
@@ -109,8 +146,12 @@ def publish_config(
     out: dict[str, Any] = {**config, "views": without_talk(views)}
     if title:
         out["title"] = title
+    renames = dict(paths or {})
     if dashboard and public_path:
-        out = rewrite_paths(out, dashboard, public_path)
+        renames[dashboard] = public_path
+    # Longest first: "dashboard-guest-2" before "dashboard-guest".
+    for real in sorted(renames, key=len, reverse=True):
+        out = rewrite_paths(out, real, renames[real])
     return out
 
 

@@ -37,7 +37,7 @@ HEX_COLOR = re.compile(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})")
 # -- the page --------------------------------------------------------------------
 
 
-def head_script(public_path: str) -> str:
+def head_script(public_path: str, paths: list[str] | None = None, sidebar: bool = False) -> str:
     """Runs before the frontend: fake credentials, and a websocket that comes here.
 
     The public page shares its origin with the owner's Home Assistant, and so
@@ -51,6 +51,10 @@ def head_script(public_path: str) -> str:
     """
     ws_path = f"/{public_path}/ws"
     panel = json.dumps(json.dumps(public_path))
+    # With more than one panel the sidebar is how a visitor gets from one to
+    # the other; with one it has nothing to offer and stays away.
+    docked = json.dumps(json.dumps("docked" if sidebar else "always_hidden"))
+    bases = json.dumps(["/" + p for p in (paths or [public_path])])
     return (
         "<script>(function(){"
         "var origin=location.origin,S=Storage.prototype,g=S.getItem,s=S.setItem,r=S.removeItem;"
@@ -62,7 +66,7 @@ def head_script(public_path: str) -> str:
         # The shadow: these keys never touch the real localStorage.
         "var mem={hassTokens:JSON.stringify({access_token:'public',token_type:'Bearer',"
         "expires_in:1800,hassUrl:origin,clientId:origin+'/',expires:Date.now()+315360000000,"
-        f"refresh_token:'public'}}),dockedSidebar:'\"always_hidden\"',defaultPanel:{panel}}};"
+        f"refresh_token:'public'}}),dockedSidebar:{docked},defaultPanel:{panel}}};"
         "function mine(o,k){try{return o===window.localStorage&&Object.prototype.hasOwnProperty.call(mem,k);}catch(e){return false;}}"
         "S.getItem=function(k){return mine(this,k)?mem[k]:g.call(this,k);};"
         "S.setItem=function(k,v){if(mine(this,k)){mem[k]=String(v);return;}return s.call(this,k,v);};"
@@ -94,9 +98,11 @@ def head_script(public_path: str) -> str:
         # Only the published dashboard exists here. A card that navigates
         # anywhere else on this Home Assistant (settings, another dashboard)
         # would land on an error page, so such a move is simply not made.
-        f"var base={json.dumps('/' + public_path)};"
+        f"var bases={bases};"
         "function stay(u){try{if(u==null)return false;var x=new URL(u,location.href);"
-        "return x.origin===origin&&x.pathname!==base&&x.pathname.indexOf(base+'/')!==0;}catch(e){return false;}}"
+        "if(x.origin!==origin)return false;"
+        "for(var i=0;i<bases.length;i++){if(x.pathname===bases[i]||x.pathname.indexOf(bases[i]+'/')===0)return false;}"
+        "return true;}catch(e){return false;}}"
         "['pushState','replaceState'].forEach(function(n){var o=history[n];"
         "history[n]=function(d,t,u){if(stay(u))return;return o.apply(this,arguments);};});"
         "})();</script>"
@@ -112,13 +118,17 @@ GLASS_SCRIPT = r"""
   // With one published view the whole header goes. With several, the header
   // stays as the tab bar (and the back arrow of a subview); only its menu
   // button and its edit/search/assistant buttons go.
-  var TABS=__SHOW_HEADER__;
+  var TABS=__SHOW_HEADER__, SIDEBAR=__SIDEBAR__;
   var HEADER=TABS
-    ? 'ha-menu-button,.action-items{display:none!important}'
-      +'.toolbar{padding-inline-start:var(--ha-space-2,8px)!important}'
+    ? (SIDEBAR?'':'ha-menu-button,')+'.action-items{display:none!important}'
+      +(SIDEBAR?'':'.toolbar{padding-inline-start:var(--ha-space-2,8px)!important}')
     : '.header,.toolbar{display:none!important}'
       +'#view{padding-top:0!important;margin-top:0!important}';
-  var MAIN='ha-sidebar{display:none!important}';
+  // With several panels the sidebar is the way between them; what it offers
+  // besides (notifications, the user's profile, settings) is not a visitor's.
+  var MAIN=SIDEBAR?'':'ha-sidebar{display:none!important}';
+  var SIDE='.after-spacer,#sidebar-notifications,#sidebar-profile,#sidebar-config,'
+    +'.notifications,.user,.configuration,[href="/profile"],[href="/config"]{display:none!important}';
   function deep(sel, root){root=root||document;var st=[root];while(st.length){var n=st.pop();
     var f=n.querySelector&&n.querySelector(sel);if(f)return f;
     var all=n.querySelectorAll?n.querySelectorAll('*'):[];for(var i=0;i<all.length;i++)if(all[i].shadowRoot)st.push(all[i].shadowRoot);}return null;}
@@ -126,16 +136,17 @@ GLASS_SCRIPT = r"""
   // the frontend redraws the header (another tab, into a subview and back).
   function dress(host, css){var sh=host&&host.shadowRoot;if(!sh||sh.querySelector('style[data-public-access]'))return;
     var st=document.createElement('style');st.setAttribute('data-public-access','');st.textContent=css;sh.appendChild(st);}
-  var root=null, main=null;
+  var root=null, main=null, side=null;
   function apply(search){
     if(!root||!root.isConnected)root=search?deep('hui-root'):null;
     if(!main||!main.isConnected)main=search?deep('home-assistant-main'):null;
-    dress(root,HEADER);dress(main,MAIN);
+    if(SIDEBAR&&(!side||!side.isConnected))side=search?deep('ha-sidebar'):null;
+    dress(root,HEADER);if(MAIN)dress(main,MAIN);if(SIDEBAR)dress(side,SIDE);
   }
   // Look hard while the page builds, then keep an inexpensive watch: the
   // frontend makes a new dashboard root when the owner edits the dashboard.
   var n=0;var t=setInterval(function(){apply(true);if(++n>120){clearInterval(t);
-    setInterval(function(){apply(!root||!root.isConnected||!main||!main.isConnected);},2000);}},250);
+    setInterval(function(){apply(!root||!root.isConnected||!main||!main.isConnected||(SIDEBAR&&(!side||!side.isConnected)));},2000);}},250);
   // What goes wrong in the page is told to the owner (it shows in the
   // integration's diagnostics): a card that threw, a script that did not
   // load, an error card and what it says. A dozen at most per visit.
@@ -171,9 +182,11 @@ GLASS_SCRIPT = r"""
 """
 
 
-def glass_script(show_header: bool = False) -> str:
-    """The cosmetic layer, with or without the tab bar."""
-    return GLASS_SCRIPT.replace("__SHOW_HEADER__", "true" if show_header else "false")
+def glass_script(show_header: bool = False, sidebar: bool = False) -> str:
+    """The cosmetic layer, with or without the tab bar and the sidebar."""
+    return GLASS_SCRIPT.replace("__SHOW_HEADER__", "true" if show_header else "false").replace(
+        "__SIDEBAR__", "true" if sidebar else "false"
+    )
 
 
 def loading_style(color: str | None) -> str:
@@ -205,10 +218,14 @@ def assemble_page(
     public_path: str,
     loading_background: str | None = None,
     show_header: bool = False,
+    paths: list[str] | None = None,
 ) -> str:
-    """Home Assistant's own index page with the scripts put in place."""
-    early = head_script(public_path) + loading_style(loading_background)
-    glass = glass_script(show_header)
+    """Home Assistant's own index page with the scripts put in place.
+    ``paths`` are the public addresses of every panel of the link; more than
+    one brings the sidebar."""
+    sidebar = len(paths or []) > 1
+    early = head_script(public_path, paths, sidebar) + loading_style(loading_background)
+    glass = glass_script(show_header, sidebar)
     head = index_html.find("<head>")
     if head < 0:
         return early + index_html + glass
@@ -229,9 +246,8 @@ class Session:
 
     def inbound(self, kind: str, msg: dict[str, Any]) -> dict[str, Any]:
         """Rewrite an allowed request before it is forwarded."""
-        if kind == "lovelace/config":
-            # The frontend asks for the dashboard by its public name.
-            return {**msg, "url_path": self.dashboard}
+        # lovelace/config is turned from the public name into the real one by
+        # the integration, which knows every dashboard the link publishes.
         return msg
 
     def silent_subscription(self, msg_id: int) -> Any:
@@ -270,7 +286,8 @@ class Session:
             # The frontend also looks up its default panel by the fixed name
             # "lovelace" while booting and stops if it is missing: an alias of
             # the same published dashboard.
-            alias = {**result[self.public_path], "url_path": "lovelace"}
+            # Without a title, so that it is no second entry in the sidebar.
+            alias = {**result[self.public_path], "url_path": "lovelace", "title": None}
             message["result"] = {**result, "lovelace": alias}
         elif kind == "auth/current_user":
             result["is_admin"] = False

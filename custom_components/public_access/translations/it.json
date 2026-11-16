@@ -5,19 +5,46 @@
         "title": "Quale dashboard?",
         "description": "Scegli la dashboard da pubblicare.\n\nConsiglio: creane una apposta per il pubblico, con solo ciò che gli estranei possono vedere. Qui compaiono solo le dashboard salvate almeno una volta.",
         "data": {
-          "dashboard": "Dashboard"
+          "dashboard": "Dashboard",
+          "name": "Per chi è questo link? (nota personale)"
         }
       },
       "path": {
         "title": "Indirizzo pubblico",
-        "description": "È l’indirizzo che condividerai. I visitatori lo aprono **senza login**:\n\n**{base_url}/**`percorso-pubblico`\n\nPer esempio, con `solare` la pagina sarà su `{base_url}/solare`.\n\nUsa lettere minuscole, cifre e underscore, senza trattino: così non può mai entrare in conflitto con una tua dashboard.",
+        "description": "È l’indirizzo che condividerai. I visitatori lo aprono **senza login**:\n\n**{base_url}/**`percorso-pubblico`\n\nPer esempio, con `solare` la pagina sarà su `{base_url}/solare`.\n\nUsa lettere minuscole, cifre e underscore, senza trattino: così non può mai entrare in conflitto con una tua dashboard.\n\nOgni voce di questa integrazione è un link. Un link può terminare da solo: dopo un intervallo di tempo a partire da ora, oppure a una data. Lascia vuoti entrambi i campi per un link che dura finché non lo disattivi.",
         "data": {
-          "public_path": "Percorso pubblico"
+          "public_path": "Percorso pubblico",
+          "valid_for": "Valido per (a partire da ora)",
+          "expires_at": "Oppure: termina il (data e ora)"
+        },
+        "data_description": {
+          "valid_for": "Per esempio 2 ore, oppure 7 giorni. Se impostato, sostituisce la data qui sotto.",
+          "expires_at": "Vuoto: il link non termina da solo. Da quel momento l'indirizzo risponde 'non trovato' e chi sta guardando viene disconnesso."
         }
       },
       "view": {
         "title": "Quali viste?",
         "description": "Una dashboard può avere più viste: le schede in alto in **{dashboard}**. Scegli quelle che diventano pubbliche; i visitatori passano dall'una all'altra con le stesse schede. Ogni vista che lasci fuori resta privata e non viene nemmeno inviata al browser del visitatore.",
+        "data": {
+          "views": "Viste da pubblicare"
+        }
+      },
+      "more": {
+        "title": "Che altro?",
+        "description": "Oltre alla dashboard principale un link può mostrare altre dashboard, la dashboard Energia di Home Assistant e l'interfaccia di Frigate. I visitatori passano dall'una all'altra con la barra laterale. Ognuna ha il proprio indirizzo: quello del link, un trattino basso e il suo nome.",
+        "data": {
+          "more_dashboards": "Altre dashboard",
+          "energy": "Dashboard Energia",
+          "frigate_ui": "Interfaccia di Frigate (sola lettura)"
+        },
+        "data_description": {
+          "more_dashboards": "Ognuna è mostrata per intero, a meno che tu non ne scelga le viste nel passaggio successivo.",
+          "frigate_ui": "Diretta, revisione, esplorazione e registrazioni delle telecamere Frigate selezionate sotto, e di nessun'altra. Niente impostazioni, eliminazioni, esportazioni o controllo delle telecamere."
+        }
+      },
+      "more_views": {
+        "title": "Quali viste di {dashboard}?",
+        "description": "All'inizio sono selezionate tutte le viste. Una vista aggiunta in seguito a **{dashboard}** non viene pubblicata finché non la selezioni qui.",
         "data": {
           "views": "Viste da pubblicare"
         }
@@ -27,20 +54,22 @@
       "invalid_path": "Usa da 2 a 48 caratteri: solo lettere minuscole, cifre e underscore (nessun trattino).",
       "path_reserved": "Questo percorso è riservato da Home Assistant.",
       "path_in_use": "Questo percorso appartiene già a un pannello o a una dashboard. Usarlo nasconderebbe una parte del tuo Home Assistant.",
-      "no_views": "Scegli almeno una vista."
+      "no_views": "Scegli almeno una vista.",
+      "path_taken": "Un altro link ha già quell'indirizzo, o uno che inizia allo stesso modo.",
+      "expiry_past": "Quel momento è già passato.",
+      "invalid_expiry": "Non è una data e ora valida."
     },
     "abort": {
-      "single_instance_allowed": "Public Access è già configurato.",
       "no_dashboards": "Nessuna dashboard ha una configurazione salvata. Crea una dashboard, aggiungi le card, salvala e poi configura questa integrazione."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Impostazioni di Public Access",
+        "title": "Impostazioni del link",
         "description": "La dashboard è pubblicata attraverso il frontend di Home Assistant, dal vivo e in sola lettura: i visitatori vedono esattamente le viste che hai scelto e non possono modificare nulla. Il cambio del percorso pubblico ha effetto dopo il riavvio di Home Assistant.",
         "data": {
-          "enabled": "Pubblica la dashboard",
+          "enabled": "Il link è attivo",
           "dashboard": "Dashboard",
           "views": "Viste da pubblicare (schede della dashboard)",
           "support_views": "Viste di supporto (inviate, ma non mostrate come schede)",
@@ -52,14 +81,32 @@
           "camera_streams": "Consenti ai visitatori di avviare i flussi video dal vivo",
           "frigate_cameras": "Telecamere Frigate che i visitatori possono sfogliare",
           "frame_ancestors": "Origini autorizzate all'incorporamento (CSP frame-ancestors)",
-          "loading_background": "Colore della schermata di caricamento (esadecimale, es. #111111; vuoto = predefinito di Home Assistant)"
+          "loading_background": "Colore della schermata di caricamento (esadecimale, es. #111111; vuoto = predefinito di Home Assistant)",
+          "name": "Per chi è questo link? (nota personale)",
+          "more_dashboards": "Altre dashboard",
+          "energy": "Dashboard Energia",
+          "frigate_ui": "Interfaccia di Frigate (sola lettura)",
+          "valid_for": "Valido per (a partire da ora)",
+          "expires_at": "Oppure: termina il (data e ora)"
         },
         "data_description": {
           "support_views": "Per le card che riusano qualcosa da un'altra scheda: card di riferimento, popup, una planimetria 3D i cui popup mostrano card tenute altrove. Una vista di supporto non ha una scheda, ma un visitatore che la cerca può leggerla: non deve contenere nulla di privato.",
           "title": "Mostrato nella scheda del browser al posto del nome della dashboard e del nome della tua casa. Vuoto: il nome della dashboard.",
           "camera_streams": "Solo per le telecamere presenti in una vista pubblicata. Disattivato: quelle telecamere mostrano immagini fisse.",
           "frigate_cameras": "Eventi, istantanee, clip e registrazioni di queste telecamere possono essere aperti dalle card delle viste pubblicate. Le telecamere la cui entità o il cui nome compare in una vista pubblicata sono incluse senza elencarle qui; tutte le altre restano chiuse.",
-          "hide_location": "Normalmente il frontend di Home Assistant riceve la posizione della casa. Attivo: i browser dei visitatori ricevono 0, 0. Una card centrata sulla casa (un radar meteo) mostra allora il posto sbagliato; disattivalo se le viste pubblicate mostrano comunque dove si trova la casa."
+          "hide_location": "Normalmente il frontend di Home Assistant riceve la posizione della casa. Attivo: i browser dei visitatori ricevono 0, 0. Una card centrata sulla casa (un radar meteo) mostra allora il posto sbagliato; disattivalo se le viste pubblicate mostrano comunque dove si trova la casa.",
+          "enabled": "Disattivato: il link è revocato. L'indirizzo risponde 'non trovato' e chi sta guardando viene disconnesso subito. Esiste anche un'entità interruttore.",
+          "valid_for": "Per esempio 2 ore, oppure 7 giorni. Se impostato, sostituisce la data qui sotto.",
+          "expires_at": "Vuoto: il link non termina da solo. Da quel momento l'indirizzo risponde 'non trovato' e chi sta guardando viene disconnesso.",
+          "frigate_ui": "Diretta, revisione, esplorazione e registrazioni delle telecamere Frigate selezionate sotto, e di nessun'altra. Niente impostazioni, eliminazioni, esportazioni o controllo delle telecamere.",
+          "more_dashboards": "Ognuna è mostrata per intero, a meno che tu non ne scelga le viste nel passaggio successivo."
+        }
+      },
+      "more_views": {
+        "title": "Quali viste di {dashboard}?",
+        "description": "All'inizio sono selezionate tutte le viste. Una vista aggiunta in seguito a **{dashboard}** non viene pubblicata finché non la selezioni qui.",
+        "data": {
+          "views": "Viste da pubblicare"
         }
       }
     },
@@ -68,7 +115,10 @@
       "path_reserved": "Questo percorso è riservato da Home Assistant.",
       "path_in_use": "Questo percorso appartiene già a un pannello o a una dashboard.",
       "invalid_color": "Usa un colore esadecimale come #111 o #1b1c1e, oppure lascia vuoto.",
-      "no_views": "Scegli almeno una vista."
+      "no_views": "Scegli almeno una vista.",
+      "path_taken": "Un altro link ha già quell'indirizzo, o uno che inizia allo stesso modo.",
+      "expiry_past": "Quel momento è già passato.",
+      "invalid_expiry": "Non è una data e ora valida."
     }
   },
   "issues": {

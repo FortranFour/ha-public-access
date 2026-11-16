@@ -116,6 +116,7 @@ def _session(access):
     session._publish = _coordinator(views=["overview"]).publish
     session._types, session._watched, session.notes = {}, {}, []
     session._conditions = set()
+    session._asked = {}
     session._note = session.notes.append
     session.refused, session.page_errors = [], []
     session._notes = type("Notes", (), {
@@ -509,3 +510,62 @@ def test_a_page_cannot_have_conditions_watched_without_end(monkeypatch):
     session.handle({"id": 4, "type": "unsubscribe_events", "subscription": 1})
     session.handle({"id": 5, "type": "subscribe_condition", "condition": condition})
     assert [m["id"] for m in wire.forwarded] == [1, 2, 4, 5]
+
+
+# -- a link with several panels ------------------------------------------------
+
+def _site_session():
+    from sanitize import Panel
+    session, wire = _session(_access())
+    session._site = [
+        Panel(path="solar", dashboard="energy-public", title="Solar", views=("overview",)),
+        Panel(path="solar_guests", dashboard="dashboard-guest", title="Guests", views=("__all__",)),
+        Panel(path="solar_energy", kind="energy", dashboard="energy"),
+        Panel(path="solar_frigate", kind="frigate", title="Frigate"),
+    ]
+    return session, wire
+
+
+def test_every_panel_of_the_link_is_in_the_sidebar_and_nothing_else():
+    session, _ = _site_session()
+    owners = {
+        "energy-public": {"component_name": "lovelace", "icon": "mdi:solar-power", "title": "Real name", "url_path": "energy-public"},
+        "dashboard-guest": {"component_name": "lovelace", "icon": "mdi:account", "title": "Guest", "url_path": "dashboard-guest"},
+        "dashboard-private": {"component_name": "lovelace", "title": "Private", "url_path": "dashboard-private"},
+        "energy": {"component_name": "energy", "icon": "mdi:lightning-bolt", "title": "energy", "url_path": "energy", "require_admin": False},
+        "config": {"component_name": "config", "title": "config", "url_path": "config", "require_admin": True},
+    }
+    panels = session._panels(owners)
+    assert list(panels) == ["solar", "solar_guests", "solar_energy", "solar_frigate"]
+    assert panels["solar"]["title"] == "Solar" and panels["solar"]["url_path"] == "solar"
+    assert panels["solar_guests"]["title"] == "Guests" and panels["solar_guests"]["component_name"] == "lovelace"
+    assert panels["solar_energy"]["component_name"] == "energy" and panels["solar_energy"]["url_path"] == "solar_energy"
+    assert panels["solar_frigate"]["component_name"] == "iframe" and panels["solar_frigate"]["config"] == {"url": "/solar_frigate/ui/"}
+    assert "Private" not in json.dumps(panels) and "dashboard-guest" not in json.dumps(panels)
+    del owners["energy"]
+    assert "solar_energy" not in session._panels(owners), "no Energy dashboard, no entry"
+
+
+def test_each_dashboard_is_asked_for_by_its_public_address():
+    session, wire = _site_session()
+    session.handle({"id": 5, "type": "lovelace/config", "url_path": "solar_guests"})
+    session.handle({"id": 6, "type": "lovelace/config", "url_path": "solar"})
+    session.handle({"id": 7, "type": "lovelace/config", "url_path": "dashboard-private"})
+    session.handle({"id": 8, "type": "lovelace/config", "url_path": "dashboard-guest"})
+    assert [m["url_path"] for m in wire.forwarded] == ["dashboard-guest", "energy-public", "energy-public", "energy-public"]
+    assert session._asked == {5: "dashboard-guest", 6: "energy-public", 7: "energy-public", 8: "energy-public"}
+    session.handle({"id": 9, "type": "lovelace/dashboards/list"})
+    assert [(d["url_path"], d["show_in_sidebar"]) for d in wire.answers[-1]["result"]] == [("solar", True), ("solar_guests", True)]
+
+
+def test_an_edit_reaches_the_visitor_under_the_public_address_only():
+    session, _ = _site_session()
+    session._types[3] = "subscribe_events"
+
+    def event(url_path):
+        return session._filter_outbound({"id": 3, "type": "event", "event": {
+            "event_type": "lovelace_updated", "data": {"url_path": url_path, "mode": "storage"}}})
+
+    assert event("dashboard-guest")["event"]["data"]["url_path"] == "solar_guests"
+    assert event("energy-public")["event"]["data"]["url_path"] == "solar"
+    assert event("dashboard-private") is None

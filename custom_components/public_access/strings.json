@@ -5,19 +5,46 @@
         "title": "Which dashboard?",
         "description": "Pick the dashboard to publish.\n\nTip: create one just for the public, with only what strangers may see. Only dashboards you have saved at least once appear here.",
         "data": {
-          "dashboard": "Dashboard"
+          "dashboard": "Dashboard",
+          "name": "Who is this link for? (your own note)"
         }
       },
       "path": {
         "title": "Public address",
-        "description": "This is the address you will share. Visitors open it with **no login**:\n\n**{base_url}/**`public-path`\n\nFor example, with `solar` the page will be at `{base_url}/solar`.\n\nUse lowercase letters, digits and underscores, with no hyphen: that way it can never clash with one of your dashboards.",
+        "description": "This is the address you will share. Visitors open it with **no login**:\n\n**{base_url}/**`public-path`\n\nFor example, with `solar` the page will be at `{base_url}/solar`.\n\nUse lowercase letters, digits and underscores, with no hyphen: that way it can never clash with one of your dashboards.\n\nEvery entry of this integration is one link. A link can end by itself: after a span of time counted from now, or on a date. Leave both empty for a link that lasts until you switch it off.",
         "data": {
-          "public_path": "Public path"
+          "public_path": "Public path",
+          "valid_for": "Valid for (counted from now)",
+          "expires_at": "Or: ends on (date and time)"
+        },
+        "data_description": {
+          "valid_for": "For example 2 hours, or 7 days. When set, it replaces the date below.",
+          "expires_at": "Empty: the link does not end by itself. From that moment the address answers 'not found' and everyone looking is disconnected."
         }
       },
       "view": {
         "title": "Which views?",
         "description": "A dashboard can have several views: the tabs at the top of **{dashboard}**. Pick the ones that become public; visitors move between them with the same tabs. Every view you leave out stays private and is not even sent to the visitor's browser.",
+        "data": {
+          "views": "Views to publish"
+        }
+      },
+      "more": {
+        "title": "What else?",
+        "description": "Besides its main dashboard a link can show further dashboards, Home Assistant's Energy dashboard and Frigate's own interface. Visitors move between them with the sidebar. Each gets its own address: the link's, an underscore, and its name.",
+        "data": {
+          "more_dashboards": "Further dashboards",
+          "energy": "Energy dashboard",
+          "frigate_ui": "Frigate's own interface (read-only)"
+        },
+        "data_description": {
+          "more_dashboards": "Each is shown whole unless you choose its views in the next step.",
+          "frigate_ui": "Live view, review, explore and recordings of the Frigate cameras ticked below, and no others. No settings, no deleting, no exports, no camera control."
+        }
+      },
+      "more_views": {
+        "title": "Which views of {dashboard}?",
+        "description": "Every view is ticked to begin with. A view you add to **{dashboard}** later is not published until you tick it here.",
         "data": {
           "views": "Views to publish"
         }
@@ -27,20 +54,22 @@
       "invalid_path": "Use 2-48 characters: lowercase letters, digits and underscores only (no hyphen).",
       "path_reserved": "That path is reserved by Home Assistant.",
       "path_in_use": "That path already belongs to a panel or dashboard. Choosing it would hide part of your Home Assistant.",
-      "no_views": "Pick at least one view."
+      "no_views": "Pick at least one view.",
+      "path_taken": "Another link already has that address, or one that begins the same way.",
+      "expiry_past": "That moment has already passed.",
+      "invalid_expiry": "Not a date and time."
     },
     "abort": {
-      "single_instance_allowed": "Public Access is already configured.",
       "no_dashboards": "No dashboard has a saved configuration yet. Create a dashboard, add cards, save it, then set this up."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Public Access settings",
+        "title": "Link settings",
         "description": "Your dashboard is published through Home Assistant's own frontend, live and read-only: visitors see exactly the views you chose and cannot change anything. Changing the public path takes effect after a Home Assistant restart.",
         "data": {
-          "enabled": "Serve the public dashboard",
+          "enabled": "Link is active",
           "dashboard": "Dashboard",
           "views": "Views to publish (tabs of the dashboard)",
           "support_views": "Supporting views (sent, but not shown as tabs)",
@@ -52,14 +81,32 @@
           "camera_streams": "Let visitors start live camera streams",
           "frigate_cameras": "Frigate cameras visitors may browse",
           "frame_ancestors": "Allowed embedding origins (CSP frame-ancestors)",
-          "loading_background": "Loading screen colour (hex, e.g. #111111; empty = Home Assistant default)"
+          "loading_background": "Loading screen colour (hex, e.g. #111111; empty = Home Assistant default)",
+          "name": "Who is this link for? (your own note)",
+          "more_dashboards": "Further dashboards",
+          "energy": "Energy dashboard",
+          "frigate_ui": "Frigate's own interface (read-only)",
+          "valid_for": "Valid for (counted from now)",
+          "expires_at": "Or: ends on (date and time)"
         },
         "data_description": {
           "support_views": "For cards that reuse something from another tab: reference cards, popups, a 3D floor plan whose popups show cards kept elsewhere. A supporting view has no tab, but a visitor who looks for it can read it, so it must hold nothing private.",
           "title": "Shown in the browser tab instead of the dashboard's own name and your home's name. Empty: the dashboard's name.",
           "camera_streams": "Only for cameras on a published view. Off: those cameras show still pictures.",
           "frigate_cameras": "Events, snapshots, clips and recordings of these cameras can be opened by cards on the published views. Cameras whose camera entity or name is on a published view are included without being listed here; every other camera stays closed.",
-          "hide_location": "Home Assistant's frontend is normally told where the home is. On: visitors' browsers get 0, 0 instead. A card that centres on the home (a weather radar) then shows the wrong place; switch this off if your published views show where the home is anyway."
+          "hide_location": "Home Assistant's frontend is normally told where the home is. On: visitors' browsers get 0, 0 instead. A card that centres on the home (a weather radar) then shows the wrong place; switch this off if your published views show where the home is anyway.",
+          "enabled": "Off: the link is revoked. Its address answers 'not found' and everyone looking is disconnected at once. There is also a switch entity for this.",
+          "valid_for": "For example 2 hours, or 7 days. When set, it replaces the date below.",
+          "expires_at": "Empty: the link does not end by itself. From that moment the address answers 'not found' and everyone looking is disconnected.",
+          "frigate_ui": "Live view, review, explore and recordings of the Frigate cameras ticked below, and no others. No settings, no deleting, no exports, no camera control.",
+          "more_dashboards": "Each is shown whole unless you choose its views in the next step."
+        }
+      },
+      "more_views": {
+        "title": "Which views of {dashboard}?",
+        "description": "Every view is ticked to begin with. A view you add to **{dashboard}** later is not published until you tick it here.",
+        "data": {
+          "views": "Views to publish"
         }
       }
     },
@@ -68,7 +115,10 @@
       "path_reserved": "That path is reserved by Home Assistant.",
       "path_in_use": "That path already belongs to a panel or dashboard.",
       "invalid_color": "Use a hex colour such as #111 or #1b1c1e, or leave it empty.",
-      "no_views": "Pick at least one view."
+      "no_views": "Pick at least one view.",
+      "path_taken": "Another link already has that address, or one that begins the same way.",
+      "expiry_past": "That moment has already passed.",
+      "invalid_expiry": "Not a date and time."
     }
   },
   "issues": {

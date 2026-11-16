@@ -12,7 +12,9 @@ keep that impossible:
 
 from __future__ import annotations
 
+from datetime import timedelta
 import re
+import secrets
 from typing import Any
 
 import voluptuous as vol
@@ -31,15 +33,21 @@ from .const import (
     CONF_CAMERA_STREAMS,
     CONF_DASHBOARD,
     CONF_ENABLED,
+    CONF_ENERGY,
+    CONF_EXPIRES_AT,
     CONF_FRAME_ANCESTORS,
     CONF_FRIGATE_CAMERAS,
+    CONF_FRIGATE_UI,
     CONF_HIDE_LOCATION,
     CONF_LOADING_BACKGROUND,
+    CONF_MORE,
+    CONF_NAME,
     CONF_NOINDEX,
     CONF_PUBLIC_PATH,
     CONF_SHOW_TABS,
     CONF_SUPPORT_VIEWS,
     CONF_TITLE,
+    CONF_VALID_FOR,
     CONF_VIEW_PATH,
     CONF_VIEWS,
     DEFAULT_NOINDEX,
@@ -48,10 +56,13 @@ from .const import (
     RESERVED_PATHS,
 )
 
+# Frigate's own interface for visitors: offered once frigate_ui.py is in place.
+FRIGATE_UI_READY = False
+
 PATH_PATTERN = re.compile(r"^[a-z0-9_]{2,48}$")
 COLOR_PATTERN = re.compile(r"^#(?:[0-9a-f]{3}|[0-9a-f]{6})$")
 
-from .sanitize import FIRST_VIEW, configured_views  # noqa: E402
+from .sanitize import FIRST_VIEW, configured_views, sub_path  # noqa: E402
 
 
 def view_options(dashboard: dict[str, Any]) -> list[selector.SelectOptionDict]:
@@ -111,49 +122,229 @@ def public_base_url(hass: Any) -> str:
         return "https://your-home-assistant"
 
 
-def validate_public_path(hass: Any, path: str) -> str | None:
-    """Return an error key, or None when the path is safe to claim."""
+def validate_public_path(hass: Any, path: str, entry_id: str | None = None) -> str | None:
+    """Return an error key, or None when the path is safe to claim.
+
+    A link also answers at its address followed by an underscore and a name
+    (its other panels: "/home_energy"), so neither a panel of Home Assistant
+    nor another link may sit there, or the other way round."""
     if not PATH_PATTERN.match(path or ""):
         return "invalid_path"
     if path in RESERVED_PATHS:
         return "path_reserved"
-    if path in ha_data.registered_panel_paths(hass):
+
+    def clash(other: str) -> bool:
+        return other == path or other.startswith(path + "_") or path.startswith(other + "_")
+
+    if any(other == path or other.startswith(path + "_") for other in ha_data.registered_panel_paths(hass)):
         return "path_in_use"
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        if entry.entry_id == entry_id:
+            continue
+        other = {**entry.data, **entry.options}.get(CONF_PUBLIC_PATH)
+        if other and clash(str(other)):
+            return "path_taken"
     return None
 
 
-class PublicAccessConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Walk the owner through dashboard, view and public path."""
+def random_path() -> str:
+    """An address nobody can guess, for a link handed to one person."""
+    alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
+    return "".join(secrets.choice(alphabet) for _ in range(12))
+
+
+def entry_title(name: str | None, path: str) -> str:
+    return f"{name.strip()} (/{path})" if name and name.strip() else f"/{path}"
+
+
+def expiry_from(hass: Any, user_input: dict[str, Any]) -> tuple[str | None, str | None]:
+    """(when the link ends, error). "Valid for" counts from now and wins over
+    a date; neither means the link does not end by itself."""
+    from homeassistant.util import dt as dt_util
+
+    valid_for = user_input.get(CONF_VALID_FOR)
+    if isinstance(valid_for, dict):
+        span = timedelta(
+            days=valid_for.get("days", 0) or 0, hours=valid_for.get("hours", 0) or 0,
+            minutes=valid_for.get("minutes", 0) or 0, seconds=valid_for.get("seconds", 0) or 0,
+        )
+        if span.total_seconds() > 0:
+            return (dt_util.utcnow() + span).isoformat(timespec="seconds"), None
+    raw = user_input.get(CONF_EXPIRES_AT)
+    if not raw:
+        return None, None
+    parsed = dt_util.parse_datetime(str(raw))
+    if parsed is None:
+        return None, "invalid_expiry"
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt_util.get_default_time_zone())
+    if dt_util.as_utc(parsed) <= dt_util.utcnow():
+        return None, "expiry_past"
+    return dt_util.as_utc(parsed).isoformat(timespec="seconds"), None
+
+
+def local_expiry(stored: Any) -> str | None:
+    """A stored end time as the date-and-time field shows it."""
+    from homeassistant.util import dt as dt_util
+
+    parsed = dt_util.parse_datetime(str(stored)) if stored else None
+    if parsed is None:
+        return None
+    return dt_util.as_local(parsed).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def life_fields(current: dict[str, Any] | None = None) -> dict[Any, Any]:
+    """How long the link lasts: a span from now, or a date and time."""
+    current = current or {}
+    return {
+        vol.Optional(CONF_VALID_FOR): selector.DurationSelector(
+            selector.DurationSelectorConfig(enable_day=True)
+        ),
+        vol.Optional(
+            CONF_EXPIRES_AT,
+            description={"suggested_value": local_expiry(current.get(CONF_EXPIRES_AT))},
+        ): selector.DateTimeSelector(),
+    }
+
+
+def more_fields(
+    hass: Any, dashboards: list[dict[str, Any]], main: str | None, current: dict[str, Any] | None = None
+) -> dict[Any, Any]:
+    """What else the link shows besides its main dashboard."""
+    current = current or {}
+    chosen = [m["dashboard"] for m in current.get(CONF_MORE) or [] if isinstance(m, dict) and m.get("dashboard")]
+    others = [
+        selector.SelectOptionDict(value=d["url_path"], label=f"{d['title']} ({d['url_path']})")
+        for d in dashboards
+        if d["url_path"] != main
+    ]
+    known = {o["value"] for o in others}
+    others += [selector.SelectOptionDict(value=c, label=f"{c} (not found)") for c in chosen if c not in known]
+    fields: dict[Any, Any] = {}
+    if others:
+        fields[vol.Optional(CONF_MORE, default=[c for c in chosen if c != main])] = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=others, multiple=True, mode=selector.SelectSelectorMode.DROPDOWN
+            )
+        )
+    if "energy" in ha_data.registered_panel_paths(hass) or current.get(CONF_ENERGY):
+        fields[vol.Required(CONF_ENERGY, default=bool(current.get(CONF_ENERGY)))] = bool
+    if FRIGATE_UI_READY and (ha_data.frigate_instances(hass) or current.get(CONF_FRIGATE_UI)):
+        fields[vol.Required(CONF_FRIGATE_UI, default=bool(current.get(CONF_FRIGATE_UI)))] = bool
+    return fields
+
+
+def stored_more(
+    dashboards: list[dict[str, Any]], wanted: list[str], views: dict[str, list[str]],
+    public_path: str, *, energy: bool, frigate: bool,
+) -> list[dict[str, Any]]:
+    """The link's other dashboards as stored: each with its views, its title
+    and its public address (the link's, an underscore, the title)."""
+    taken = {public_path}
+    if energy:
+        taken.add(f"{public_path}_energy")
+    if frigate:
+        taken.add(f"{public_path}_frigate")
+    out = []
+    for url_path in wanted:
+        board = next((d for d in dashboards if d["url_path"] == url_path), None)
+        title = (board or {}).get("title") or url_path
+        path = sub_path(public_path, title, taken)
+        taken.add(path)
+        out.append({"dashboard": url_path, "title": title, "views": views.get(url_path) or [], "path": path})
+    return out
+
+
+class _MoreViews:
+    """The step both flows share: for each further dashboard with several
+    views, which of them. Everything is ticked to begin with; a view added to
+    the dashboard later is not published until it is ticked here."""
+
+    _dashboards: list[dict[str, Any]]
+    _wanted: list[str]
+    _pending: list[str]
+    _views: dict[str, list[str]]
+
+    def _start_more(self, wanted: list[str], before: dict[str, list[str]]) -> None:
+        self._wanted = list(wanted)
+        self._views = {}
+        self._before = before
+        self._pending = []
+        for url_path in self._wanted:
+            options = view_options(self._board(url_path))
+            if len(options) <= 1:
+                self._views[url_path] = [options[0]["value"]] if options else [FIRST_VIEW]
+            else:
+                self._pending.append(url_path)
+
+    def _board(self, url_path: str) -> dict[str, Any]:
+        return next((d for d in self._dashboards if d["url_path"] == url_path), {"views": []})
+
+    async def async_step_more_views(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None and self._pending:
+            chosen = _stored_views(user_input.get(CONF_VIEWS))
+            if chosen:
+                self._views[self._pending.pop(0)] = chosen
+            else:
+                errors[CONF_VIEWS] = "no_views"
+        if not self._pending:
+            return await self._more_done()
+        url_path = self._pending[0]
+        board = self._board(url_path)
+        options = view_options(board)
+        before = [v for v in self._before.get(url_path) or [] if v in {o["value"] for o in options}]
+        return self.async_show_form(  # type: ignore[attr-defined]
+            step_id="more_views",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_VIEWS, default=before or [o["value"] for o in options]): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=options, multiple=True, mode=selector.SelectSelectorMode.LIST
+                        )
+                    ),
+                }
+            ),
+            errors=errors,
+            description_placeholders={"dashboard": board.get("title") or url_path},
+        )
+
+
+class PublicAccessConfigFlow(_MoreViews, ConfigFlow, domain=DOMAIN):
+    """Make one link: who it is for, what it shows, its address, how long it lasts.
+
+    Every entry of this integration is one link. Add another entry for
+    another link, with its own selection and its own life."""
 
     VERSION = 1
 
     def __init__(self) -> None:
         self._data: dict[str, Any] = {}
+        self._options: dict[str, Any] = {}
         self._dashboards: list[dict[str, Any]] = []
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Start with the dashboard: there is nothing else to ask first."""
-        if self._async_current_entries():
-            return self.async_abort(reason="single_instance_allowed")
         return await self.async_step_dashboard()
 
     async def async_step_dashboard(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Pick which dashboard, and which view of it, to publish."""
+        """Who the link is for, and its main dashboard."""
         self._dashboards = await ha_data.async_list_publishable_dashboards(self.hass)
         if not self._dashboards:
             return self.async_abort(reason="no_dashboards")
 
         if user_input is not None:
             self._data[CONF_DASHBOARD] = user_input[CONF_DASHBOARD]
+            self._options[CONF_NAME] = (user_input.get(CONF_NAME) or "").strip()
             views = view_options(self._dashboard(user_input[CONF_DASHBOARD]))
             if len(views) <= 1:
                 # One view (or none with an address): nothing to choose.
                 self._data[CONF_VIEWS] = [views[0]["value"]] if views else [FIRST_VIEW]
-                return await self.async_step_path()
+                return await self.async_step_more()
             return await self.async_step_view()
 
         options = [
@@ -166,6 +357,7 @@ class PublicAccessConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="dashboard",
             data_schema=vol.Schema(
                 {
+                    vol.Optional(CONF_NAME): str,
                     vol.Required(CONF_DASHBOARD): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=options, mode=selector.SelectSelectorMode.DROPDOWN
@@ -188,7 +380,7 @@ class PublicAccessConfigFlow(ConfigFlow, domain=DOMAIN):
             chosen = _stored_views(user_input.get(CONF_VIEWS))
             if chosen:
                 self._data[CONF_VIEWS] = chosen
-                return await self.async_step_path()
+                return await self.async_step_more()
             errors[CONF_VIEWS] = "no_views"
 
         views = view_options(dashboard)
@@ -207,33 +399,67 @@ class PublicAccessConfigFlow(ConfigFlow, domain=DOMAIN):
             description_placeholders={"dashboard": dashboard.get("title", "")},
         )
 
+    async def async_step_more(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """What else the link shows: further dashboards, Energy, Frigate."""
+        fields = more_fields(self.hass, self._dashboards, self._data[CONF_DASHBOARD])
+        if not fields:
+            self._start_more([], {})
+            return await self._more_done()
+        if user_input is not None:
+            self._options[CONF_ENERGY] = bool(user_input.get(CONF_ENERGY))
+            self._options[CONF_FRIGATE_UI] = bool(user_input.get(CONF_FRIGATE_UI))
+            self._start_more(_stored_views(user_input.get(CONF_MORE) or []), {})
+            return await self.async_step_more_views()
+        return self.async_show_form(step_id="more", data_schema=vol.Schema(fields))
+
+    async def _more_done(self) -> ConfigFlowResult:
+        return await self.async_step_path()
+
     async def async_step_path(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Choose the public path, validated against panels and dashboards."""
+        """The link's address, and how long it lasts."""
         errors: dict[str, str] = {}
         if user_input is not None:
             path = user_input[CONF_PUBLIC_PATH].strip().strip("/").lower()
             error = validate_public_path(self.hass, path)
+            expires, expiry_error = expiry_from(self.hass, user_input)
             if error:
                 errors[CONF_PUBLIC_PATH] = error
+            elif expiry_error:
+                errors[CONF_EXPIRES_AT] = expiry_error
             else:
                 self._data[CONF_PUBLIC_PATH] = path
                 return self.async_create_entry(
-                    title=f"/{path}",
+                    title=entry_title(self._options.get(CONF_NAME), path),
                     data=self._data,
                     options={
                         CONF_ENABLED: True,
                         CONF_NOINDEX: DEFAULT_NOINDEX,
                         CONF_SHOW_TABS: True,
                         CONF_CAMERA_STREAMS: True,
+                        CONF_NAME: self._options.get(CONF_NAME) or "",
+                        CONF_ENERGY: bool(self._options.get(CONF_ENERGY)),
+                        CONF_FRIGATE_UI: bool(self._options.get(CONF_FRIGATE_UI)),
+                        CONF_MORE: stored_more(
+                            self._dashboards, self._wanted, self._views, path,
+                            energy=bool(self._options.get(CONF_ENERGY)),
+                            frigate=bool(self._options.get(CONF_FRIGATE_UI)),
+                        ),
+                        CONF_EXPIRES_AT: expires or "",
                     },
                 )
 
+        # The first link keeps the plain address; every further one starts
+        # with an address nobody can guess.
+        first = not self._async_current_entries()
+        suggested = (user_input or {}).get(CONF_PUBLIC_PATH) or (DEFAULT_PUBLIC_PATH if first else random_path())
         return self.async_show_form(
             step_id="path",
             data_schema=vol.Schema(
-                {vol.Required(CONF_PUBLIC_PATH, default=DEFAULT_PUBLIC_PATH): str}
+                {vol.Required(CONF_PUBLIC_PATH, default=suggested): str, **life_fields()}
             ),
             errors=errors,
             description_placeholders={"base_url": public_base_url(self.hass)},
@@ -245,8 +471,10 @@ class PublicAccessConfigFlow(ConfigFlow, domain=DOMAIN):
         return PublicAccessOptionsFlow()
 
 
-class PublicAccessOptionsFlow(OptionsFlow):
-    """Change what is published and how."""
+class PublicAccessOptionsFlow(_MoreViews, OptionsFlow):
+    """Change what a link shows, where, and for how long."""
+
+    _saved: dict[str, Any]
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -257,9 +485,17 @@ class PublicAccessOptionsFlow(OptionsFlow):
         if user_input is not None:
             path = user_input[CONF_PUBLIC_PATH].strip().strip("/").lower()
             if path != current.get(CONF_PUBLIC_PATH):
-                error = validate_public_path(self.hass, path)
+                error = validate_public_path(self.hass, path, self.config_entry.entry_id)
                 if error:
                     errors[CONF_PUBLIC_PATH] = error
+            expires, expiry_error = expiry_from(self.hass, user_input)
+            if expiry_error == "expiry_past" and local_expiry(current.get(CONF_EXPIRES_AT)) == str(
+                user_input.get(CONF_EXPIRES_AT)
+            ):
+                # An expired link's date, left as it was: still expired.
+                expires, expiry_error = str(current.get(CONF_EXPIRES_AT)), None
+            if expiry_error:
+                errors[CONF_EXPIRES_AT] = expiry_error
             color = (user_input.get(CONF_LOADING_BACKGROUND) or "").strip().lower()
             if color and not COLOR_PATTERN.match(color):
                 errors[CONF_LOADING_BACKGROUND] = "invalid_color"
@@ -268,19 +504,29 @@ class PublicAccessOptionsFlow(OptionsFlow):
                 errors[CONF_VIEWS] = "no_views"
             support = [v for v in _stored_views(user_input.get(CONF_SUPPORT_VIEWS)) if v not in chosen]
             if not errors:
-                return self.async_create_entry(
-                    data={
-                        **user_input,
-                        CONF_LOADING_BACKGROUND: color,
-                        CONF_PUBLIC_PATH: path,
-                        CONF_VIEWS: chosen,
-                        CONF_SUPPORT_VIEWS: support,
-                        CONF_TITLE: (user_input.get(CONF_TITLE) or "").strip(),
-                        CONF_FRIGATE_CAMERAS: _stored_views(user_input.get(CONF_FRIGATE_CAMERAS)),
-                        # What versions before 0.6 read: the first chosen view.
-                        CONF_VIEW_PATH: _stored_view(chosen[0]),
-                    }
-                )
+                self._saved = {
+                    **{k: v for k, v in user_input.items() if k != CONF_VALID_FOR},
+                    CONF_LOADING_BACKGROUND: color,
+                    CONF_PUBLIC_PATH: path,
+                    CONF_VIEWS: chosen,
+                    CONF_SUPPORT_VIEWS: support,
+                    CONF_TITLE: (user_input.get(CONF_TITLE) or "").strip(),
+                    CONF_NAME: (user_input.get(CONF_NAME) or "").strip(),
+                    CONF_ENERGY: bool(user_input.get(CONF_ENERGY)),
+                    CONF_FRIGATE_UI: bool(user_input.get(CONF_FRIGATE_UI)),
+                    CONF_EXPIRES_AT: expires or "",
+                    CONF_FRIGATE_CAMERAS: _stored_views(user_input.get(CONF_FRIGATE_CAMERAS)),
+                    # What versions before 0.6 read: the first chosen view.
+                    CONF_VIEW_PATH: _stored_view(chosen[0]),
+                }
+                self._dashboards = await ha_data.async_list_publishable_dashboards(self.hass)
+                wanted = [d for d in _stored_views(user_input.get(CONF_MORE) or []) if d != user_input[CONF_DASHBOARD]]
+                before = {
+                    m["dashboard"]: list(m.get("views") or [])
+                    for m in current.get(CONF_MORE) or [] if isinstance(m, dict) and m.get("dashboard")
+                }
+                self._start_more(wanted, before)
+                return await self.async_step_more_views()
 
         dashboards = await ha_data.async_list_publishable_dashboards(self.hass)
         current_dashboard = next(
@@ -315,6 +561,8 @@ class PublicAccessOptionsFlow(OptionsFlow):
 
         fields: dict[Any, Any] = {
             vol.Required(CONF_ENABLED, default=current.get(CONF_ENABLED, True)): bool,
+            vol.Optional(CONF_NAME, description={"suggested_value": current.get(CONF_NAME) or ""}): str,
+            **life_fields(current),
             vol.Required(
                 CONF_DASHBOARD, default=current.get(CONF_DASHBOARD)
             ): selector.SelectSelector(
@@ -324,6 +572,7 @@ class PublicAccessOptionsFlow(OptionsFlow):
             ),
             vol.Required(CONF_VIEWS, default=chosen_views): view_selector(chosen_views),
             vol.Optional(CONF_SUPPORT_VIEWS, default=support_views): view_selector(support_views),
+            **more_fields(self.hass, dashboards, current.get(CONF_DASHBOARD), current),
             vol.Required(CONF_SHOW_TABS, default=current.get(CONF_SHOW_TABS, True)): bool,
             vol.Optional(
                 CONF_TITLE, description={"suggested_value": current.get(CONF_TITLE) or ""}
@@ -367,3 +616,15 @@ class PublicAccessOptionsFlow(OptionsFlow):
             )
         ] = str
         return self.async_show_form(step_id="init", data_schema=vol.Schema(fields), errors=errors)
+
+    async def _more_done(self) -> ConfigFlowResult:
+        saved = self._saved
+        path = saved[CONF_PUBLIC_PATH]
+        saved[CONF_MORE] = stored_more(
+            self._dashboards, self._wanted, self._views, path,
+            energy=saved[CONF_ENERGY], frigate=saved[CONF_FRIGATE_UI],
+        )
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, title=entry_title(saved.get(CONF_NAME), path)
+        )
+        return self.async_create_entry(data=saved)

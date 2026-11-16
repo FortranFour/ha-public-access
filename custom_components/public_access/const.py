@@ -16,6 +16,13 @@ CONF_CAMERA_STREAMS: Final = "camera_streams"
 CONF_FRIGATE_CAMERAS: Final = "frigate_cameras"
 CONF_HIDE_LOCATION: Final = "hide_location"
 CONF_PUBLIC_PATH: Final = "public_path"
+# One entry is one link: its own address, its own selection, its own life.
+CONF_NAME: Final = "name"  # who the link is for; the owner's label
+CONF_MORE: Final = "more_dashboards"  # [{"dashboard", "views", "path", "title"}]
+CONF_ENERGY: Final = "energy"  # Home Assistant's Energy dashboard
+CONF_FRIGATE_UI: Final = "frigate_ui"  # Frigate's own interface, read-only
+CONF_EXPIRES_AT: Final = "expires_at"  # ISO date and time, or empty: never
+CONF_VALID_FOR: Final = "valid_for"  # asked in the form, stored as expires_at
 CONF_ENABLED: Final = "enabled"
 CONF_NOINDEX: Final = "noindex"
 CONF_CACHE_SECONDS: Final = "cache_seconds"

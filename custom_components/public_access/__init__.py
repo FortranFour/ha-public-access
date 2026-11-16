@@ -1,12 +1,19 @@
-"""Public Access — publish chosen views of one Home Assistant dashboard publicly, read-only."""
+"""Public Access — publish chosen dashboards and views of Home Assistant publicly, read-only.
+
+One config entry is one link: its own address, its own selection, its own
+life (it can be switched off, and can end by itself at a set time)."""
 
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv, issue_registry as ir
+from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.helpers.typing import ConfigType
 
 from homeassistant.helpers.storage import Store
@@ -20,6 +27,9 @@ _LOGGER = logging.getLogger(__name__)
 
 DATA_COORDINATOR = "coordinator"
 DATA_REGISTERED_PATHS = "registered_paths"
+
+# One switch per link: off is revoked.
+PLATFORMS = [Platform.SWITCH]
 
 # Set up from the UI only; there is nothing to configure in YAML.
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -102,6 +112,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     entry.async_on_unload(entry.add_update_listener(_options_updated))
 
+    # A link with a date: at that moment everyone using it is hung up on. The
+    # address itself answers "not found" from then on (coordinator.live).
+    expires = coordinator.expires_at
+    if expires is not None and not coordinator.expired:
+
+        async def _expired(_now: Any) -> None:
+            _LOGGER.info("Public Access link /%s has expired", public_path)
+            await coordinator.async_close_sockets()
+            async_dispatcher_send(hass, f"{DOMAIN}_{entry.entry_id}_changed")
+
+        entry.async_on_unload(async_track_point_in_utc_time(hass, _expired, expires))
+
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
@@ -117,10 +140,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     deactivated instead: the view then answers 404 like an unconfigured path.
     """
     domain_data = hass.data.get(DOMAIN, {})
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     stored = domain_data.pop(entry.entry_id, None)
     if stored and (coordinator := stored.get(DATA_COORDINATOR)):
         coordinator.active = False
-    return True
+        # Whoever is looking is hung up on: a link that is removed, switched
+        # off or changed must not go on showing what it showed.
+        await coordinator.async_close_sockets()
+    return unloaded
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:

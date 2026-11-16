@@ -18,6 +18,8 @@
 
 | | |
 | --- | --- |
+| **Links** | Every entry of the integration is one link: its own address, its own selection of dashboards and views, its own life. Make one for each person or purpose. A link can be switched off (revoked) from its options or with its switch entity, and can end by itself after a span of time or on a date. |
+| **More than one dashboard** | A link can show further dashboards (each with the views you tick) and Home Assistant's Energy dashboard next to its main one. Visitors get the sidebar to move between them, with nothing else of yours in it. |
 | **Several views** | Pick any number of the dashboard's tabs. Visitors get Home Assistant's own tab bar for them, without the menu, edit, search and assistant buttons. Subviews keep their back arrow. With one view, or with the tab bar switched off, the page is the view and nothing else, as before. |
 | **Links between views** | A card that navigates to `/your-dashboard/lights` goes to `/your-public-path/lights`. The dashboard's real address and name are replaced before anything is sent; a public title replaces them in the browser tab. Navigation to anything outside the published dashboard is not made. |
 | **Supporting views** | Views that are sent but have no tab, for cards that reuse something kept on another tab: [Dashboard References](https://github.com/FortranFour/dashboard-references) cards, popups, a floor plan whose room panels take their entities from source cards elsewhere. |
@@ -55,6 +57,25 @@ Say Home Assistant is at `https://home.example.com` and the dashboard **House** 
 > A view can be picked if it has an address of its own (the view's settings, *URL*), except the first view of the dashboard, which always can.
 
 The public path uses lowercase letters, digits and underscores, with **no hyphen**: every Home Assistant dashboard address contains a hyphen, so a public path without one can never clash with a dashboard of yours. Paths Home Assistant already uses (`config`, `energy`, `history`, …) are refused.
+
+## Links
+
+Add the integration once for every link you want to hand out (*Settings → Devices & services → Public Access → Add entry*). Each entry asks:
+
+1. **Who it is for** (your own note; it names the entry and the switch) and the **main dashboard**.
+2. **The views** of that dashboard.
+3. **What else**: further dashboards, the Energy dashboard. For each further dashboard with several views you then tick its views.
+4. **The address**, and **how long the link lasts**: a span counted from now (*2 hours*, *7 days*), or a date and time, or neither.
+
+The first link is offered the address `public`; every further one is offered twelve random letters and digits, which nobody can guess. Use your own word if you prefer.
+
+| | |
+| --- | --- |
+| **Addresses** | The main dashboard is at the link's address. Every other panel is at that address, an underscore, and its name: `/k3x9q2m7ap4t`, `/k3x9q2m7ap4t_guest_suite`, `/k3x9q2m7ap4t_energy`. A card that navigates from one published dashboard to another keeps working: the addresses are rewritten. Because of this, no two links may have addresses where one is the other followed by an underscore. |
+| **What each link can read** | Only what its own selection uses. Two links to different views read different entities; neither can read the other's. |
+| **Revoking** | Switch *Link is active* off in the link's options, or turn off its switch entity (`switch.public_link_…`, handy on a dashboard or in an automation). The address answers "not found" at once and everyone looking is disconnected. Switching it on brings the same address back. Deleting the entry removes the link for good. |
+| **Time limit** | When the time is up the same happens by itself. The entry stays, marked expired on its switch (`expired: true`); give it a new date to bring it back. |
+| **Sidebar** | Shown only when a link has more than one panel. It lists the link's panels and nothing else: no notifications, no profile, no settings. A view of a further dashboard that you add later is not published until you tick it. |
 
 ## Options
 
