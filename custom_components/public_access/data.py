@@ -16,6 +16,74 @@ from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 
+def auto_entities_world(hass: HomeAssistant) -> Any:
+    """The home as an auto-entities card sees it (autoentities.World): every
+    state, and the registries its filters look entities up in."""
+    from homeassistant.helpers import (
+        area_registry as ar,
+        device_registry as dr,
+        entity_registry as er,
+        floor_registry as fr,
+        label_registry as lr,
+    )
+    from homeassistant.util import dt as dt_util
+
+    from .autoentities import World
+
+    world = World(now=dt_util.utcnow())
+    for state in hass.states.async_all():
+        world.states[state.entity_id] = {
+            "state": state.state,
+            "attributes": state.attributes,
+            "last_changed": state.last_changed,
+            "last_updated": state.last_updated,
+        }
+    for entry in er.async_get(hass).entities.values():
+        world.entities[entry.entity_id] = {
+            "platform": entry.platform,
+            "config_entry_id": entry.config_entry_id,
+            "device_id": entry.device_id,
+            "area_id": entry.area_id,
+            "entity_category": entry.entity_category.value if entry.entity_category else None,
+            "hidden_by": entry.hidden_by.value if entry.hidden_by else None,
+            "labels": list(entry.labels),
+        }
+    for device in dr.async_get(hass).devices.values():
+        world.devices[device.id] = {
+            "id": device.id,
+            "name": device.name,
+            "name_by_user": device.name_by_user,
+            "manufacturer": device.manufacturer,
+            "model": device.model,
+            "area_id": device.area_id,
+            "labels": list(device.labels),
+        }
+    for area in ar.async_get(hass).async_list_areas():
+        world.areas[area.id] = {"name": area.name, "floor_id": area.floor_id}
+    for floor in fr.async_get(hass).async_list_floors():
+        world.floors[floor.floor_id] = {"name": floor.name, "level": floor.level}
+    for label in lr.async_get(hass).async_list_labels():
+        world.labels[label.label_id] = {"name": label.name}
+    return world
+
+
+async def async_render_owner_template(
+    hass: HomeAssistant, template: str, variables: dict[str, Any]
+) -> Any:
+    """Render a template the owner wrote in a published view, here on the
+    server, to learn what it names. None if it fails or takes too long."""
+    try:
+        from homeassistant.helpers.template import Template
+
+        made = Template(template, hass)
+        if await made.async_render_will_timeout(3, variables):
+            return None
+        return made.async_render(variables)
+    except Exception:  # noqa: BLE001 - a template that fails names nothing
+        _LOGGER.debug("An auto-entities template could not be rendered", exc_info=True)
+        return None
+
+
 def panel_look(hass: HomeAssistant, url_path: str) -> dict[str, Any] | None:
     """A sidebar panel's name and icon as the owner has them (their own
     renaming included), or None if there is no such panel.

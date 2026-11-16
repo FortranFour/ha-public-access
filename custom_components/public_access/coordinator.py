@@ -20,7 +20,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from . import data as ha_data
+from . import autoentities, data as ha_data
 from .const import (
     CONF_CAMERA_STREAMS,
     CONF_DASHBOARD,
@@ -304,6 +304,7 @@ class PublicDashboardCoordinator:
         candidates: set[str] = set()
         strings: set[str] = set()
         conditions: set[str] = set()
+        plains: list[dict[str, Any]] = []
         anything = False
         for panel in self.panels:
             if panel.kind != "dashboard" or not panel.dashboard:
@@ -318,6 +319,7 @@ class PublicDashboardCoordinator:
             if not sent["views"]:
                 continue
             anything = True
+            plains.append(plain)
             found = referenced_ids(plain)
             entities |= found[0]
             statistics |= found[1]
@@ -329,6 +331,11 @@ class PublicDashboardCoordinator:
         energy_panel = any(p.kind == "energy" for p in self.panels)
         if not anything and not energy_panel and not any(p.kind == "frigate" for p in self.panels):
             return Access(camera_streams=False)
+        # Cards that name no entities but pick them with filters
+        # (auto-entities): what the filters select is published too.
+        picked = await self._async_auto_entities(plains)
+        self._auto_entities = len(picked - entities)
+        entities |= picked
         # UIX foundries are card definitions kept outside the dashboard. The
         # ones a sent view uses are part of that view: their text and their
         # entities count as written there.
@@ -364,6 +371,32 @@ class PublicDashboardCoordinator:
             hide_location=bool(self.options.get(CONF_HIDE_LOCATION, True)),
             conditions=conditions,
         )
+
+    async def _async_auto_entities(self, configs: list[dict[str, Any]]) -> set[str]:
+        """The entities the auto-entities cards on the published views select
+        (autoentities.py). Worked out afresh with the rest of the access, so a
+        battery that drops below a card's threshold joins within the half
+        minute the access is kept for."""
+        cards = [card for config in configs for card in autoentities.cards_in(config)]
+        if not cards:
+            return set()
+        try:
+            world = ha_data.auto_entities_world(self.hass)
+            picked: set[str] = set()
+            for card in cards[:100]:
+                template = (card.get("filter") or {}).get("template")
+                rendered = (
+                    await ha_data.async_render_owner_template(self.hass, template, {"config": card})
+                    if isinstance(template, str)
+                    else None
+                )
+                picked |= autoentities.selected(
+                    card, world, (lambda _t, _v, r=rendered: r) if rendered is not None else None
+                )
+            return picked
+        except Exception:  # noqa: BLE001 - a list that stays empty is better than no page
+            _LOGGER.debug("Could not work out auto-entities filters", exc_info=True)
+            return set()
 
     def _frigate_access(self, entities: set[str], strings: set[str]) -> FrigateAccess | None:
         """Published Frigate cameras: those whose camera entity is on a sent
@@ -405,6 +438,7 @@ class PublicDashboardCoordinator:
                     for p in self.panels
                 ],
             },
+            "entities_picked_by_auto_entities_filters": getattr(self, "_auto_entities", 0),
             "dashboard": self.dashboard,
             "views_as_tabs": [
                 str(v.get("path") or "(first view)") for v in sent["views"] if v.get("visible", True) is not False
