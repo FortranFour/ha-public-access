@@ -167,3 +167,15 @@ def test_frigates_interface_is_fetched_never_written_to():
     assert "Set-Cookie" not in text.replace('"""', "")[text.index("_ANSWER_HEADERS = ("):text.index("_ASK_HEADERS")]
     view = (PACKAGE / "view.py").read_text(encoding="utf-8")
     assert "async def post(" not in view and "async def put(" not in view and "async def delete(" not in view
+
+
+def test_frigates_answers_are_passed_on_as_they_come():
+    """Frigate packs its pages (gzip). What is fetched for a visitor is
+    passed on byte for byte with the header that says how it is packed; it is
+    never unpacked here and still labelled as packed, which a browser shows
+    as an empty page. What is read here is asked for plain."""
+    text = (PACKAGE / "frigate_ui.py").read_text(encoding="utf-8")
+    assert "auto_decompress=False" in text and '_PLAIN = {"Accept-Encoding": "identity"}' in text
+    assert text.count("headers=_PLAIN") == 2, "signing in and the account check"
+    serve = text[text.index("async def async_serve"):text.index("def _cleaner")]
+    assert '"identity" if cleaner is not None else request.headers.get("Accept-Encoding", "identity")' in serve

@@ -270,9 +270,15 @@ def more_fields(
     return fields
 
 
-async def frigate_ui_answers(hass: Any, user_input: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+async def frigate_ui_answers(
+    hass: Any, user_input: dict[str, Any], published: set[str] | None = None
+) -> tuple[dict[str, Any], str | None]:
     """The Frigate interface settings as stored, and an error key if the
-    account cannot be used. Checked only when the interface is switched on."""
+    account cannot be used. Checked only when the interface is switched on.
+
+    ``published`` are the Frigate cameras the link publishes, when that is
+    known: an account that can see more is refused here, with a notification
+    naming the cameras, rather than left to show an empty panel."""
     stored = {
         CONF_FRIGATE_UI: bool(user_input.get(CONF_FRIGATE_UI)),
         CONF_FRIGATE_UI_URL: (user_input.get(CONF_FRIGATE_UI_URL) or "").strip().rstrip("/"),
@@ -285,9 +291,25 @@ async def frigate_ui_answers(hass: Any, user_input: dict[str, Any]) -> tuple[dic
         return stored, "frigate_missing"
     from . import frigate_ui
 
-    return stored, await frigate_ui.async_check(
+    error, cameras = await frigate_ui.async_check(
         hass, stored[CONF_FRIGATE_UI_URL], stored[CONF_FRIGATE_UI_USER], stored[CONF_FRIGATE_UI_PASSWORD]
     )
+    if error is None and published is not None:
+        beyond = sorted(set(cameras) - published)
+        if beyond:
+            from homeassistant.components import persistent_notification
+
+            persistent_notification.async_create(
+                hass,
+                f"The Frigate account **{stored[CONF_FRIGATE_UI_USER]}** can see cameras the link does not"
+                f" publish: **{', '.join(beyond)}**. Either tick them under \"Frigate cameras visitors may"
+                " browse\", or give the account a role in Frigate (Settings → Users → Roles) that is"
+                " limited to the cameras to show.",
+                title="Public Access: Frigate account sees too much",
+                notification_id="public_access_frigate_check",
+            )
+            return stored, "frigate_cameras_beyond"
+    return stored, error
 
 
 def stored_more(
@@ -563,7 +585,13 @@ class PublicAccessOptionsFlow(_MoreViews, OptionsFlow):
                 expires, expiry_error = None, None
             if expiry_error:
                 errors[CONF_EXPIRES_AT] = expiry_error
-            frigate, frigate_error = await frigate_ui_answers(self.hass, user_input)
+            published = set(_stored_views(user_input.get(CONF_FRIGATE_CAMERAS)))
+            try:
+                access = await self.hass.data[DOMAIN][self.config_entry.entry_id]["coordinator"].async_access()
+                published |= set(access.frigate.cameras) if access.frigate else set()
+            except Exception:  # noqa: BLE001 - the entry is not loaded: the ticks alone decide
+                pass
+            frigate, frigate_error = await frigate_ui_answers(self.hass, user_input, published)
             if frigate_error:
                 errors[CONF_FRIGATE_UI] = frigate_error
             color = (user_input.get(CONF_LOADING_BACKGROUND) or "").strip().lower()

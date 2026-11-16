@@ -136,7 +136,7 @@ What Public Access adds on top of Frigate's enforcement:
 - **No camera control and no talking.** Frigate lets a camera's user move it (PTZ) over its socket; from a visitor only requests for state are passed on. Live streams are asked only to be watched, as for camera cards.
 - **No addresses.** Frigate's configuration and statistics reach the visitor with only the allowed cameras in them, and with every address (cameras, MQTT, anything with `://`), the sign-in settings and the server's own settings removed.
 - **The visitor never holds Frigate's cookie.** Public Access signs in and fetches; the browser gets the pages and pictures.
-- **The account is checked before anything is shown.** An administrator account is refused. If the account can see a camera the link does not publish (*Frigate cameras visitors may browse*, or a camera on a published view), the Frigate panel shows nothing and the link's diagnostics name the cameras. So the cameras ticked in the link and the cameras allowed in Frigate have to agree: tick in the link every camera the role has.
+- **The account is checked before anything is shown.** An administrator account is refused. If the account can see a camera the link does not publish (*Frigate cameras visitors may browse*, or a camera on a published view), the settings are not saved, or, if the role is widened in Frigate later, the Frigate panel shows nothing. Either way a notification in Home Assistant names the cameras. So the cameras ticked in the link and the cameras allowed in Frigate have to agree: tick in the link every camera the role has.
 
 The password is stored with the link's settings in Home Assistant, like other integrations' credentials, and is left out of diagnostics.
 

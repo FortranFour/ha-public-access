@@ -66,7 +66,8 @@
       "frigate_missing": "Fill in Frigate's address, the user and the password, or switch the Frigate interface off.",
       "frigate_cannot_connect": "Frigate could not be reached at that address (expected: https, port 8971).",
       "frigate_invalid_auth": "Frigate did not accept that user name and password.",
-      "frigate_is_admin": "That Frigate account is an administrator. Use one with a role limited to the cameras to show."
+      "frigate_is_admin": "That Frigate account is an administrator. Use one with a role limited to the cameras to show.",
+      "frigate_cameras_beyond": "That Frigate account can see cameras this link does not publish. A notification in Home Assistant names them. Tick them under 'Frigate cameras visitors may browse', or limit the account's role in Frigate."
     },
     "abort": {
       "no_dashboards": "No dashboard has a saved configuration yet. Create a dashboard, add cards, save it, then set this up."
@@ -138,7 +139,8 @@
       "frigate_missing": "Fill in Frigate's address, the user and the password, or switch the Frigate interface off.",
       "frigate_cannot_connect": "Frigate could not be reached at that address (expected: https, port 8971).",
       "frigate_invalid_auth": "Frigate did not accept that user name and password.",
-      "frigate_is_admin": "That Frigate account is an administrator. Use one with a role limited to the cameras to show."
+      "frigate_is_admin": "That Frigate account is an administrator. Use one with a role limited to the cameras to show.",
+      "frigate_cameras_beyond": "That Frigate account can see cameras this link does not publish. A notification in Home Assistant names them. Tick them under 'Frigate cameras visitors may browse', or limit the account's role in Frigate."
     }
   },
   "issues": {

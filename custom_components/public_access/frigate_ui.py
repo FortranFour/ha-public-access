@@ -70,6 +70,7 @@ from .policy import (
 _LOGGER = logging.getLogger(__name__)
 
 CHECK_SECONDS = 60
+RECHECK_SECONDS = 5
 # What a browser may be told about a fetched file, and what it may ask with.
 _ANSWER_HEADERS = (
     "Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag",
@@ -84,6 +85,7 @@ _CSP = (
     "worker-src 'self' blob:; font-src 'self' data:; "
     "form-action 'none'; base-uri 'self'; frame-ancestors 'self'"
 )
+_PLAIN = {"Accept-Encoding": "identity"}
 _SOCKETS = {
     "ws": "state",
     "live/mse/api/ws": "stream",
@@ -125,8 +127,13 @@ class FrigateUi:
         if self._session is None or self._session.closed:
             # Frigate's own certificate is self-signed; the address is the
             # owner's. Cookies are kept for an address that may be an IP.
+            # Answers are passed on byte for byte, compressed as Frigate sent
+            # them, with the headers that say so: never unpacked here and
+            # then labelled as packed. What is read here asks for plain text.
             self._session = ClientSession(
-                cookie_jar=CookieJar(unsafe=True), connector=TCPConnector(ssl=False)
+                cookie_jar=CookieJar(unsafe=True),
+                connector=TCPConnector(ssl=False),
+                auto_decompress=False,
             )
             self._signed_in = False
         return self._session
@@ -141,6 +148,7 @@ class FrigateUi:
             async with self.session().post(
                 f"{self.base}/api/login",
                 json={"user": self._user, "password": self._password},
+                headers=_PLAIN,
                 timeout=ClientTimeout(total=15),
                 allow_redirects=False,
             ) as response:
@@ -161,7 +169,8 @@ class FrigateUi:
                 return error, None
         try:
             async with self.session().get(
-                f"{self.base}/api/profile", timeout=ClientTimeout(total=15), allow_redirects=False
+                f"{self.base}/api/profile", headers=_PLAIN, timeout=ClientTimeout(total=15),
+                allow_redirects=False,
             ) as response:
                 if response.status == 401:
                     self._signed_in = False
@@ -176,7 +185,10 @@ class FrigateUi:
         """The cameras the visitors' interface shows, or None when it must
         show nothing (``problem`` then says why, for the owner)."""
         async with self._lock:
-            if time.monotonic() - self._checked_at < CHECK_SECONDS:
+            # While there is a problem, look again soon: the owner is
+            # probably mending it and waiting for the panel to come back.
+            wait = CHECK_SECONDS if self._cameras is not None else RECHECK_SECONDS
+            if self._checked_at and time.monotonic() - self._checked_at < wait:
                 return self._cameras
             error, profile = await self.async_profile()
             if error == "invalid_auth" and profile is None:
@@ -224,18 +236,42 @@ def for_link(coordinator: Any) -> FrigateUi | None:
     return current
 
 
-async def async_check(hass: HomeAssistant, url: str, user: str, password: str) -> str | None:
-    """For the settings form: can this account be used? An error key, or None."""
+def tell_owner(coordinator: Any, problem: str | None) -> None:
+    """A notification in Home Assistant while the link's Frigate panel shows
+    nothing, saying why; taken away when it shows again. The visitor is told
+    nothing of it."""
+    from homeassistant.components import persistent_notification
+
+    if getattr(coordinator, "frigate_told", None) == problem:
+        return
+    coordinator.frigate_told = problem
+    notice = f"public_access_frigate_{coordinator.entry.entry_id}"
+    if problem is None:
+        persistent_notification.async_dismiss(coordinator.hass, notice)
+        return
+    persistent_notification.async_create(
+        coordinator.hass,
+        f"The Frigate panel of the public link **{coordinator.entry.title}** shows nothing: {problem}",
+        title="Public Access: Frigate is not shown",
+        notification_id=notice,
+    )
+
+
+async def async_check(
+    hass: HomeAssistant, url: str, user: str, password: str
+) -> tuple[str | None, list[str]]:
+    """For the settings form: can this account be used? (an error key or
+    None, the cameras the account may see)."""
     if not url.startswith(("http://", "https://")):
-        return "frigate_cannot_connect"
+        return "frigate_cannot_connect", []
     probe = FrigateUi(hass, url, user, password)
     try:
         error, profile = await probe.async_profile()
         if error:
-            return "frigate_" + error
+            return "frigate_" + error, []
         if not isinstance(profile, dict) or profile.get("role") == "admin":
-            return "frigate_is_admin"
-        return None
+            return "frigate_is_admin", []
+        return None, [str(c) for c in profile.get("allowed_cameras") or []]
     finally:
         await probe.async_close()
 
@@ -263,6 +299,7 @@ async def async_serve(view: Any, request: web.Request, panel: Any, extra: str) -
     access = await coordinator.async_access()
     published = set(access.frigate.cameras) if access.frigate else set()
     cameras = await ui.async_cameras(published)
+    tell_owner(coordinator, None if cameras is not None else ui.problem)
     if cameras is None:
         if ui.problem:
             coordinator.note_refusal("Frigate interface is not shown: " + ui.problem)
@@ -278,6 +315,12 @@ async def async_serve(view: Any, request: web.Request, panel: Any, extra: str) -
 
     headers = {name: request.headers[name] for name in _ASK_HEADERS if name in request.headers}
     headers["X-Ingress-Path"] = base_path
+    cleaner = _cleaner(path, cameras)
+    # What is cut down here is asked for plain; everything else in whatever
+    # packing the visitor's browser accepts, and passed on as it comes.
+    headers["Accept-Encoding"] = (
+        "identity" if cleaner is not None else request.headers.get("Accept-Encoding", "identity")
+    )
     url = f"{ui.base}/{path}"
     if request.query_string:
         url += "?" + request.query_string
@@ -303,7 +346,6 @@ async def async_serve(view: Any, request: web.Request, panel: Any, extra: str) -
         kept["Referrer-Policy"] = "no-referrer"
         kept["X-Robots-Tag"] = "noindex, nofollow"
         kept["Permissions-Policy"] = "microphone=(), camera=(), display-capture=()"
-        cleaner = _cleaner(path, cameras)
         if cleaner is not None and upstream.status == 200:
             try:
                 body = json.dumps(cleaner(await upstream.json(content_type=None)))
