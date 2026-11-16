@@ -54,6 +54,9 @@ VIEWER_NAME = "Public Access viewer"
 # Concurrent public websocket connections, in total. The view refuses extra
 # visitors before the upgrade; this is the backstop behind it.
 MAX_CONNECTIONS = MAX_PUBLIC_SESSIONS
+# Conditions one page may have Home Assistant watch at a time. A large
+# dashboard has a few dozen; some are re-evaluated every second.
+MAX_CONDITIONS = 500
 
 # What the frontend needs to draw a dashboard and nothing more. Every type not
 # listed is refused. Types marked "filtered" are rewritten so the visitor only
@@ -100,6 +103,13 @@ ALLOWED_TYPES: frozenset[str] = frozenset(
         # and nothing else (policy.Access.template_trust). Anything else
         # could read every state and is refused.
         "render_template",
+        # Whether a conditional card, or a card with a "visibility", shows:
+        # since Home Assistant 2026.11 the frontend asks the server instead of
+        # working it out from the states it has. Passed on only for a plain
+        # comparison of published entities or a condition written in a
+        # published view (policy.Access.condition_allowed); anything else
+        # would answer yes-or-no questions about the whole house.
+        "subscribe_condition",
         # UIX (UI eXtension): its frontend waits for this subscription before
         # it draws anything it forges (cards, badges, rows), and receives its
         # shared templates ("foundries") through it. Its messages that change
@@ -284,6 +294,8 @@ class MirrorSession:
         # render_template subscriptions whose results are checked before
         # they are passed on, with their text for the owner's diagnostics.
         self._watched: dict[int, str] = {}
+        # subscribe_condition subscriptions that are open.
+        self._conditions: set[int] = set()
         # The frontend glue, called only after this class's own filters.
         self._core = core.Session(public_path=public_path, dashboard=dashboard)
         self._loop = hass.loop
@@ -585,6 +597,7 @@ class MirrorSession:
 
         if kind == "unsubscribe_events":
             self._watched.pop(msg.get("subscription"), None)
+            self._conditions.discard(msg.get("subscription"))
         answered, result = self._core.local_answer(kind, msg)
         if answered:
             self._reply_ok(msg_id, result)
@@ -691,6 +704,28 @@ class MirrorSession:
             msg = checked
         elif kind == "lovelace/config":
             msg = {**msg, "url_path": self._dashboard}
+        elif kind == "subscribe_condition":
+            condition = msg.get("condition")
+            # A state compared with another entity's ("state: input_select.x")
+            # reads that entity as well.
+            outside = self._unpublished_entities_in(condition)
+            if outside or not self._access.condition_allowed(condition):
+                self._note(
+                    "Condition not evaluated for a visitor: "
+                    + (
+                        "it names " + ", ".join(outside[:8]) + ", not on a published view."
+                        if outside
+                        else "it is neither a plain comparison of published entities"
+                        " nor written in a published view."
+                    )
+                    + f" Condition: {json.dumps(condition, default=str)[:300]}"
+                )
+                self._refuse(msg_id, kind, "(not from a published view)")
+                return
+            if len(self._conditions) >= MAX_CONDITIONS:
+                self._refuse(msg_id, kind, "(too many at once)")
+                return
+            self._conditions.add(msg_id)
         elif kind == "render_template":
             outside = self._unpublished_entities_in(msg.get("variables"))
             if outside:

@@ -10,6 +10,7 @@ state, and nothing here imports Home Assistant.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Iterable
 
@@ -166,6 +167,29 @@ def collect_strings(node: Any) -> set[str]:
                 walk(item)
 
     walk(node)
+    return found
+
+
+def condition_key(condition: Any) -> str:
+    """One condition as text, the same however its keys are ordered."""
+    return json.dumps(condition, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def collect_conditions(node: Any) -> set[str]:
+    """Every condition written in a piece of dashboard configuration (the
+    ``visibility`` of a card, the ``conditions`` of a conditional card), each
+    as ``condition_key`` gives it. A condition is anything with a
+    ``condition`` key that names its kind."""
+    found: set[str] = set()
+    stack = [node]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            if isinstance(value.get("condition"), str):
+                found.add(condition_key(value))
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
     return found
 
 

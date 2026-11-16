@@ -57,6 +57,31 @@ _UNWATCHABLE = re.compile(
     rf"(?<![.\w])(?:{_UNWATCHABLE_NAMES})\s*\(|\|\s*(?:{_UNWATCHABLE_NAMES})\b"
 )
 
+# Conditions. Home Assistant decides for the page whether a conditional card
+# or a card with a ``visibility`` shows: the page sends the condition and is
+# told yes or no ("subscribe_condition"). A visitor's page could send any
+# condition, and a yes or no about an entity is a reading of it, so a
+# condition is passed on only if it is one of these plain kinds about
+# published entities, or the owner wrote it in a published view as it is.
+MAX_CONDITION_PARTS = 200
+_CONDITION_GROUPS = frozenset({"and", "or", "not"})
+_CONDITION_KEYS = {
+    "state": frozenset(
+        {"condition", "entity_id", "state", "attribute", "for", "match", "alias", "enabled"}
+    ),
+    "numeric_state": frozenset(
+        {"condition", "entity_id", "above", "below", "attribute", "alias", "enabled"}
+    ),
+}
+_TEMPLATE_MARK = re.compile(r"\{[{%#]")
+# What the frontend itself writes for "this entity has a number": a numeric
+# condition with neither bound.
+_JSON_STRING = r'"(?:[^"\\]|\\.)*"'
+_IS_NUMBER = re.compile(
+    rf"^\{{\{{ is_number\((?:states\(({_JSON_STRING})\)"
+    rf"|state_attr\(({_JSON_STRING}), {_JSON_STRING}\))\) \}}\}}$"
+)
+
 # How UIX puts a template together in the browser: the macros it needs, the
 # values ("billets") it uses, then the template itself. Each piece is checked
 # against what the owner wrote; see composed_of_written.
@@ -260,6 +285,8 @@ class Access:
     foundries: set[str] | None = None
     media: MediaMemory = field(default_factory=MediaMemory)
     hide_location: bool = True
+    # Conditions written in the published views (sanitize.collect_conditions).
+    conditions: set[str] = field(default_factory=set)
 
     def entity_allowed(self, entity_id: Any) -> bool:
         return isinstance(entity_id, str) and entity_id in self.entities
@@ -308,6 +335,62 @@ class Access:
         return isinstance(entities, (list, tuple, set, frozenset)) and all(
             self.entity_allowed(e) for e in entities
         )
+
+    # -- conditions ---------------------------------------------------------
+
+    def condition_allowed(self, condition: Any) -> bool:
+        """May Home Assistant evaluate this condition for a visitor's page?
+
+        Yes for a state or number comparison of published entities, for
+        and/or/not of such, for the frontend's own "has a number" template
+        about a published entity, and for any condition the owner wrote in a
+        published view exactly as it is asked. A template that is not written
+        there is never evaluated: unlike a rendered template, a condition
+        does not say what it read."""
+        return self._condition_allowed(condition, [MAX_CONDITION_PARTS])
+
+    def _condition_allowed(self, node: Any, left: list[int]) -> bool:
+        left[0] -= 1
+        if left[0] < 0 or not isinstance(node, dict):
+            return False
+        kind = node.get("condition")
+        if kind in _CONDITION_GROUPS:
+            members = node.get("conditions")
+            return (
+                set(node) <= {"condition", "conditions", "alias", "enabled"}
+                and isinstance(node.get("enabled", True), bool)
+                and isinstance(members, list)
+                and all(self._condition_allowed(member, left) for member in members)
+            )
+        if json.dumps(node, sort_keys=True, separators=(",", ":"), default=str) in self.conditions:
+            return True
+        if kind == "template":
+            template = node.get("value_template")
+            if not set(node) <= {"condition", "value_template", "alias", "enabled"}:
+                return False
+            if not isinstance(node.get("enabled", True), bool) or not isinstance(template, str):
+                return False
+            if template in self.strings:
+                return True
+            made = _IS_NUMBER.match(template)
+            if not made:
+                return False
+            try:
+                return self.entity_allowed(json.loads(made.group(1) or made.group(2)))
+            except ValueError:
+                return False
+        keys = _CONDITION_KEYS.get(kind)
+        if keys is None or not set(node) <= keys:
+            return False
+        entity_ids = node.get("entity_id")
+        if isinstance(entity_ids, str):
+            entity_ids = [entity_ids]
+        if not isinstance(entity_ids, list) or not entity_ids:
+            return False
+        if not all(self.entity_allowed(entity_id) for entity_id in entity_ids):
+            return False
+        # "for", "enabled" and the like take templates too.
+        return not any(_TEMPLATE_MARK.search(text) for text in _strings_of(node))
 
     # -- media ---------------------------------------------------------------
 

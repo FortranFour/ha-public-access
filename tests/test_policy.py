@@ -406,3 +406,72 @@ def test_the_media_memory_is_bounded():
     for name in ("a", "b", "c", None, ""):
         memory.note(name)
     assert len(memory) == 2 and "a" not in memory and "c" in memory
+
+
+# -- conditions (conditional cards, "visibility") ------------------------------
+
+PLAIN_CONDITIONS = [
+    {"condition": "state", "entity_id": "sensor.pv", "state": "on"},
+    {"condition": "state", "entity_id": ["sensor.pv", "calendar.bins"], "state": ["on", "off"], "attribute": "mode"},
+    {"condition": "state", "entity_id": "sensor.pv", "state": "on", "for": {"minutes": 5}},
+    {"condition": "numeric_state", "entity_id": "sensor.pv", "above": 3, "below": 9.5},
+    {"condition": "not", "conditions": [{"condition": "state", "entity_id": "sensor.pv", "state": "unavailable"}]},
+    {"condition": "or", "conditions": [
+        {"condition": "numeric_state", "entity_id": "sensor.pv", "above": 3},
+        {"condition": "and", "conditions": []},
+    ]},
+    {"condition": "template", "value_template": '{{ is_number(states("sensor.pv")) }}'},
+    {"condition": "template", "value_template": '{{ is_number(state_attr("sensor.pv", "level")) }}'},
+]
+
+
+@pytest.mark.parametrize("condition", PLAIN_CONDITIONS)
+def test_a_plain_condition_about_published_entities_is_evaluated(condition):
+    assert access().condition_allowed(condition)
+
+
+@pytest.mark.parametrize("condition", [
+    {"condition": "state", "entity_id": "lock.safe", "state": "locked"},
+    {"condition": "state", "entity_id": ["sensor.pv", "lock.safe"], "state": "on"},
+    {"condition": "state", "entity_id": [], "state": "on"},
+    {"condition": "state", "state": "on"},
+    {"condition": "numeric_state", "entity_id": "sensor.salary", "above": 50000},
+    {"condition": "numeric_state", "entity_id": "sensor.pv", "above": 3, "value_template": "{{ states('sensor.salary') }}"},
+    {"condition": "state", "entity_id": "sensor.pv", "state": "on", "for": "{{ states('sensor.salary') }}"},
+    {"condition": "state", "entity_id": "sensor.pv", "state": "on", "enabled": "{{ is_state('lock.safe', 'locked') }}"},
+    {"condition": "not", "conditions": [{"condition": "state", "entity_id": "lock.safe", "state": "locked"}]},
+    {"condition": "or", "conditions": "{{ is_state('lock.safe', 'locked') }}"},
+    {"condition": "or", "conditions": ["{{ is_state('lock.safe', 'locked') }}"]},
+    {"condition": "and", "conditions": [], "enabled": "{{ is_state('lock.safe', 'locked') }}"},
+    {"condition": "template", "value_template": "{{ is_state('lock.safe', 'locked') }}"},
+    {"condition": "template", "value_template": '{{ is_number(states("sensor.salary")) }}'},
+    {"condition": "template", "value_template": '{{ is_number(states("sensor.pv")) }}{{ is_state("lock.safe", "locked") }}'},
+    {"condition": "zone", "entity_id": "person.owner", "zone": "zone.home"},
+    {"condition": "device", "device_id": "abc", "domain": "lock", "type": "is_locked"},
+    {"condition": "lock.is_locked", "target": {"area_id": "hall"}},
+    "{{ is_state('lock.safe', 'locked') }}",
+    [{"condition": "state", "entity_id": "sensor.pv", "state": "on"}],
+    None,
+])
+def test_any_other_condition_is_not(condition):
+    assert not access().condition_allowed(condition)
+
+
+def test_a_condition_the_owner_wrote_is_evaluated_as_it_is():
+    written = {"condition": "template", "value_template": "{{ is_state('sensor.pv', 'on') and now().hour > 6 }}"}
+    sun = {"condition": "sun", "after": "sunset"}
+    made = access(
+        strings={written["value_template"]},
+        conditions={json.dumps(sun, sort_keys=True, separators=(",", ":"))},
+    )
+    assert made.condition_allowed(written)
+    assert made.condition_allowed({"after": "sunset", "condition": "sun"})
+    assert made.condition_allowed({"condition": "and", "conditions": [sun, written]})
+    assert not made.condition_allowed({"condition": "sun", "after": "sunrise"})
+    assert not made.condition_allowed({**written, "value_template": written["value_template"] + " "})
+
+
+def test_a_condition_cannot_be_made_endlessly_large():
+    one = {"condition": "state", "entity_id": "sensor.pv", "state": "on"}
+    assert access().condition_allowed({"condition": "and", "conditions": [one] * 150})
+    assert not access().condition_allowed({"condition": "and", "conditions": [one] * 250})

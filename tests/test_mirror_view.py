@@ -115,6 +115,7 @@ def _session(access):
     session._entities, session._statistics, session._templates = access.entities, access.statistics, access.strings
     session._publish = _coordinator(views=["overview"]).publish
     session._types, session._watched, session.notes = {}, {}, []
+    session._conditions = set()
     session._note = session.notes.append
     session.refused, session.page_errors = [], []
     session._notes = type("Notes", (), {
@@ -188,6 +189,14 @@ def _refused(wire):
     {"type": "frigate/events/get", "instance_id": "elsewhere"},
     {"type": "media_source/resolve_media", "media_content_id": "media-source://media_source/local/private.mp4"},
     {"type": "media_source/resolve_media", "media_content_id": "media-source://frigate/frigate/event/clips/Bedroom/1700.2-cd"},
+    {"type": "subscribe_condition", "condition": {"condition": "state", "entity_id": "lock.safe", "state": "locked"}},
+    {"type": "subscribe_condition", "condition": {"condition": "numeric_state", "entity_id": "sensor.secret", "above": 50}},
+    {"type": "subscribe_condition", "condition": {"condition": "template", "value_template": "{{ is_state('lock.safe', 'locked') }}"}},
+    {"type": "subscribe_condition", "condition": {"condition": "state", "entity_id": "sensor.pv", "state": "sensor.secret"}},
+    {"type": "subscribe_condition", "condition": {"condition": "numeric_state", "entity_id": "sensor.pv", "above": "sensor.secret"}},
+    {"type": "subscribe_condition", "condition": "{{ is_state('lock.safe', 'locked') }}"},
+    {"type": "subscribe_condition"},
+    {"type": "test_condition", "condition": {"condition": "state", "entity_id": "sensor.pv", "state": "on"}},
 ])
 def test_refused_before_it_reaches_home_assistant(msg):
     _, wire = _ask(**msg)
@@ -206,6 +215,9 @@ def test_refused_before_it_reaches_home_assistant(msg):
     {"type": "entity/source"},
     {"type": "uix/connect", "browserID": "x"},
     {"type": "uix/get_foundries"},
+    {"type": "subscribe_condition", "condition": {"condition": "state", "entity_id": "light.porch", "state": "on"}},
+    {"type": "subscribe_condition", "condition": {"condition": "not", "conditions": [
+        {"condition": "numeric_state", "entity_id": "sensor.pv", "above": 3}]}},
 ])
 def test_forwarded_when_it_is_about_something_published(msg):
     _, wire = _ask(**msg)
@@ -456,3 +468,23 @@ def test_which_integration_an_entity_is_from_is_told_for_published_entities_only
     assert wire.forwarded[0]["entity_ids"] == ["sensor.pv"]
     out = _answer("entity/source", {"sensor.pv": {"domain": "solar"}, "lock.safe": {"domain": "zwave"}})
     assert out["result"] == {"sensor.pv": {"domain": "solar"}}
+
+
+def test_a_refused_condition_is_noted_for_the_owner():
+    session, wire = _ask(type="subscribe_condition",
+                         condition={"condition": "state", "entity_id": "lock.safe", "state": "locked"})
+    assert _refused(wire)
+    assert "lock.safe" in session.notes[0] and session.refused == ["subscribe_condition (not from a published view)"]
+
+
+def test_a_page_cannot_have_conditions_watched_without_end(monkeypatch):
+    from custom_components.public_access import mirror
+    monkeypatch.setattr(mirror, "MAX_CONDITIONS", 2)
+    session, wire = _session(_access())
+    condition = {"condition": "state", "entity_id": "light.porch", "state": "on"}
+    for msg_id in (1, 2, 3):
+        session.handle({"id": msg_id, "type": "subscribe_condition", "condition": condition})
+    assert [m["id"] for m in wire.forwarded] == [1, 2] and wire.answers[0]["success"] is False
+    session.handle({"id": 4, "type": "unsubscribe_events", "subscription": 1})
+    session.handle({"id": 5, "type": "subscribe_condition", "condition": condition})
+    assert [m["id"] for m in wire.forwarded] == [1, 2, 4, 5]

@@ -167,3 +167,18 @@ def test_the_coordinates_can_be_left_in_and_nothing_else():
         "Solar", hide_location=False)
     assert public == {"latitude": 47.6, "longitude": -122.3, "elevation": 50, "radius": 100,
                       "location_name": "Solar", "config_dir": "", "external_url": None}
+
+
+def test_conditions_written_in_a_view_are_found_wherever_they_are():
+    sun = {"condition": "sun", "after": "sunset"}
+    state = {"condition": "state", "entity": "light.porch", "state": "on"}
+    config = {"views": [{"cards": [
+        {"type": "conditional", "conditions": [state], "card": {"type": "tile", "visibility": [
+            {"condition": "or", "conditions": [sun]}]}},
+        {"type": "entities", "entities": [{"entity": "light.porch", "condition": 5}]},
+    ]}]}
+    found = sanitize.collect_conditions(config)
+    assert sanitize.condition_key({"after": "sunset", "condition": "sun"}) in found
+    assert sanitize.condition_key(state) in found
+    assert sanitize.condition_key({"condition": "or", "conditions": [sun]}) in found
+    assert len(found) == 3

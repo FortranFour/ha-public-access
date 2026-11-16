@@ -40,6 +40,7 @@ from .policy import (
     frigate_cameras_in,
 )
 from .sanitize import (
+    collect_conditions,
     collect_strings,
     configured_views,
     has_published_view,
@@ -192,6 +193,7 @@ class PublicDashboardCoordinator:
         # ... and a template is also allowed in the form the visitor's
         # frontend holds it, with the dashboard's address replaced.
         strings = collect_strings(plain) | collect_strings(sent)
+        conditions = collect_conditions(plain) | collect_conditions(sent)
         # UIX foundries are card definitions kept outside the dashboard. The
         # ones a sent view uses are part of that view: their text and their
         # entities count as written there.
@@ -203,6 +205,7 @@ class PublicDashboardCoordinator:
             statistics |= in_foundries[1]
             candidates |= in_foundries[2]
             strings |= collect_strings(used)
+            conditions |= collect_conditions(used)
         # Entity ids inside templates count only if such an entity exists.
         entities |= {c for c in candidates if self.hass.states.get(c) is not None}
         prefs = await ha_data.async_energy_prefs(self.hass)
@@ -224,6 +227,7 @@ class PublicDashboardCoordinator:
             foundries=set(used) if used is not None else None,
             media=self._listed_media,
             hide_location=bool(self.options.get(CONF_HIDE_LOCATION, True)),
+            conditions=conditions,
         )
 
     def _frigate_access(self, entities: set[str], strings: set[str]) -> FrigateAccess | None:
