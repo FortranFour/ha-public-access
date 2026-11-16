@@ -182,3 +182,23 @@ def test_conditions_written_in_a_view_are_found_wherever_they_are():
     assert sanitize.condition_key(state) in found
     assert sanitize.condition_key({"condition": "or", "conditions": [sun]}) in found
     assert len(found) == 3
+
+
+def test_camera_cards_reach_a_visitor_without_their_talk_button():
+    card = {"type": "custom:advanced-camera-card", "cameras": [{"camera_entity": "camera.front"}],
+            "menu": {"style": "overlay", "buttons": {"microphone": {"enabled": True, "type": "toggle"}, "mute": {"enabled": True}}},
+            "live": {"auto_unmute": ["selected"], "microphone": {"always_connected": True, "disconnect_seconds": 90}}}
+    bare = {"type": "custom:frigate-card", "cameras": []}
+    config = {"views": [{"path": "cams", "cards": [
+        {"type": "vertical-stack", "cards": [card, {"type": "custom:dashboard-card-reference", "card": bare}]},
+        {"type": "markdown", "content": "hello", "menu": {"buttons": {"microphone": {"enabled": True}}}},
+    ]}]}
+    sent = sanitize.publish_config(config, published={"cams"})
+    stack, markdown = sent["views"][0]["cards"]
+    first, second = stack["cards"][0], stack["cards"][1]["card"]
+    assert first["menu"] == {"style": "overlay", "buttons": {"microphone": {"enabled": False, "type": "toggle"}, "mute": {"enabled": True}}}
+    assert first["live"] == {"auto_unmute": ["selected"], "microphone": {"always_connected": False, "disconnect_seconds": 90}}
+    assert second["menu"]["buttons"]["microphone"] == {"enabled": False}
+    assert second["live"]["microphone"] == {"always_connected": False}
+    assert markdown["menu"]["buttons"]["microphone"] == {"enabled": True}, "only camera cards are touched"
+    assert card["menu"]["buttons"]["microphone"]["enabled"] is True, "the owner's own configuration is not"

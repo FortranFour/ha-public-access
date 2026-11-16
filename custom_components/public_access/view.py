@@ -17,13 +17,14 @@ Design rules enforced here:
 from __future__ import annotations
 
 from datetime import timedelta
+import asyncio
 import hashlib
 from homeassistant.helpers.json import json_dumps
 import logging
 import time
 from typing import Any
 
-from aiohttp import web
+from aiohttp import WSMsgType, web
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
@@ -37,12 +38,14 @@ from .const import (
     CONF_NOINDEX,
     DEFAULT_CACHE_SECONDS,
     MAX_PUBLIC_SESSIONS,
+    MAX_PUBLIC_STREAMS,
     MAX_SESSIONS_PER_CLIENT,
+    MAX_STREAMS_PER_CLIENT,
     MEDIA_RATE_LIMIT_PER_MINUTE,
     RATE_LIMIT_PER_MINUTE,
 )
 from .coordinator import PublicDashboardCoordinator
-from .policy import clean_stream_info
+from .policy import MAX_STREAM_REQUEST, clean_stream_info, stream_request
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -89,6 +92,7 @@ class PublicDashboardView(HomeAssistantView):
         self._limiter = RateLimiter()
         self._media_limiter = RateLimiter(MEDIA_RATE_LIMIT_PER_MINUTE)
         self._sessions = guard.SessionLimiter(MAX_PUBLIC_SESSIONS, MAX_SESSIONS_PER_CLIENT)
+        self._streams = guard.SessionLimiter(MAX_PUBLIC_STREAMS, MAX_STREAMS_PER_CLIENT)
         self.last_visit: dict[str, Any] | None = None
 
     def rebind(self, coordinator: PublicDashboardCoordinator) -> None:
@@ -232,6 +236,8 @@ class PublicDashboardView(HomeAssistantView):
         if request.query_string:
             path += "?" + request.query_string
         access = await self._coordinator.async_access()
+        if access.stream_socket_allowed(path):
+            return await self._serve_stream(request, path)
         if access.stream_info_allowed(path):
             # Fetched here and passed on cleaned, never handed over as a link:
             # it names the camera's address on the home network.
@@ -274,6 +280,85 @@ class PublicDashboardView(HomeAssistantView):
         response = web.Response(status=302, headers={"Location": signed})
         response.headers["Cache-Control"] = "no-store"
         return response
+
+    async def _serve_stream(self, request: web.Request, path: str) -> web.StreamResponse:
+        """A published camera's live stream, to watch and to listen to.
+
+        The stream's socket is go2rtc's. Besides sending video it accepts a
+        WebRTC offer that carries the browser's microphone, and plays it on
+        the camera's loudspeaker; it also takes commands this page has no
+        use for. So a visitor never gets a link to it. It is opened here, as
+        the read-only viewer, and of what the visitor's side sends only
+        requests to watch go through, a WebRTC offer made receive-only
+        (``policy.stream_request``). Video comes back untouched.
+        """
+        from homeassistant.components.http.auth import async_sign_path
+
+        from . import mirror
+
+        visitor = guard.visitor_address(request)
+        if request.headers.get("Upgrade", "").lower() != "websocket":
+            response = self._json({"message": "Not found"}, status=404)
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        if not self._streams.acquire(visitor):
+            response = web.Response(text="503: Too many streams", status=503)
+            response.headers["Retry-After"] = "30"
+            return response
+        upstream = None
+        try:
+            _, token = await mirror.async_get_viewer(self.hass)
+            signed = async_sign_path(
+                self.hass, path, timedelta(seconds=30), refresh_token_id=token.id
+            )
+            upstream = await ha_data.async_open_own_socket(self.hass, signed)
+            if upstream is None:
+                response = self._json({"message": "Not available"}, status=502)
+                response.headers["Cache-Control"] = "no-store"
+                return response
+            socket = web.WebSocketResponse(heartbeat=30, max_msg_size=MAX_STREAM_REQUEST)
+            await socket.prepare(request)
+
+            async def from_visitor() -> None:
+                async for message in socket:
+                    if message.type != WSMsgType.TEXT:
+                        # go2rtc is sent text only; anything else is not a
+                        # request to watch.
+                        break
+                    passed = stream_request(message.data)
+                    if passed is None:
+                        self._coordinator.note_refusal(
+                            "Live stream: a message from a visitor was not passed on"
+                            f" to go2rtc: {str(message.data)[:120]}"
+                        )
+                        continue
+                    await upstream.send_str(passed)
+
+            async def to_visitor() -> None:
+                async for message in upstream:
+                    if message.type == WSMsgType.BINARY:
+                        await socket.send_bytes(message.data)
+                    elif message.type == WSMsgType.TEXT:
+                        await socket.send_str(message.data)
+                    else:
+                        break
+
+            tasks = [
+                asyncio.ensure_future(from_visitor()),
+                asyncio.ensure_future(to_visitor()),
+            ]
+            try:
+                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await socket.close()
+            return socket
+        finally:
+            if upstream is not None:
+                await upstream.close()
+            self._streams.release(visitor)
 
     async def _serve_page(self, request: web.Request, route: str) -> web.StreamResponse:
         from . import mirror
@@ -321,6 +406,10 @@ class PublicDashboardView(HomeAssistantView):
         # ours except the bootstrap, so the policy stays tight but must allow
         # websockets and the frontend's own assets.
         response.headers["Cache-Control"] = "no-store"
+        # A visitor looks and listens. The browser is told not to offer this
+        # page a microphone or a camera at all, so a camera card's talk
+        # button has nothing to send; the stream endpoint refuses it besides.
+        response.headers["Permissions-Policy"] = "microphone=(), camera=(), display-capture=()"
         if options.get(CONF_NOINDEX, True):
             response.headers["X-Robots-Tag"] = "noindex, nofollow"
         return response

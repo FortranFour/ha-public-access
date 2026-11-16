@@ -40,7 +40,13 @@ from homeassistant.auth.models import RefreshToken, User
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
-from .policy import CHECKED_TEMPLATE_SECONDS, MAX_SIGN_SECONDS, Access, local_path
+from .policy import (
+    CHECKED_TEMPLATE_SECONDS,
+    MAX_SIGN_SECONDS,
+    Access,
+    listen_only_sdp,
+    local_path,
+)
 from .sanitize import pin_default_panel, public_core_config, public_devices
 
 _LOGGER = logging.getLogger(__name__)
@@ -672,6 +678,14 @@ class MirrorSession:
                 if kind in CAMERA_STREAM_TYPES:
                     self._refuse(msg_id, kind, "(live streams are switched off)")
                     return
+            if kind == "camera/webrtc/offer":
+                # A visitor watches and listens; nothing of theirs is sent to
+                # the camera, whatever the page offered.
+                offer = listen_only_sdp(msg.get("offer"))
+                if offer is None:
+                    self._refuse(msg_id, kind, "(not an offer)")
+                    return
+                msg = {**msg, "offer": offer}
         elif kind == "auth/sign_path":
             path = local_path(msg.get("path"))
             msg = {**msg, "path": path}
@@ -679,6 +693,12 @@ class MirrorSession:
                 # A stream's description names the camera's address at home,
                 # so the page is pointed at the public endpoint, which serves
                 # a cleaned copy, rather than given a link to the original.
+                self._reply_ok(msg_id, {"path": f"/{self._public_path}{path}"})
+                return
+            if self._access.stream_socket_allowed(path):
+                # A live stream's socket is go2rtc's own, which would also
+                # take a microphone. The page is pointed at the public
+                # endpoint, which opens it and passes on requests to watch.
                 self._reply_ok(msg_id, {"path": f"/{self._public_path}{path}"})
                 return
             if not self._access.path_allowed(path):

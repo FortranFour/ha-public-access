@@ -85,10 +85,12 @@ def test_the_only_visitor_parameters_are_checked_against_what_is_published():
     assert text.count("request.query") == 3
     assert "history.parse_query" in text and text.count("dict(request.query)") == 1
     assert text.count("request.query_string") == 2
-    media = text[text.index("async def _serve_media"):text.index("async def _serve_page")]
+    media = text[text.index("async def _serve_media"):text.index("async def _serve_stream")]
     # Three things are signed there, each after its own check: a stream's
     # description and LLM Vision's timeline, both fetched here and passed on
     # cleaned, never handed over as a link, and a path the policy allows.
+    # A live stream's socket is handed to _serve_stream before any of them.
+    assert media.index("access.stream_socket_allowed(path)") < media.index("access.stream_info_allowed(path)")
     stream, timeline, link = [m.start() for m in __import__("re").finditer(r"async_sign_path\(\n", media)]
     assert media.index("access.stream_info_allowed(path)") < stream < media.index("clean_stream_info(info)")
     assert media.index("access.llmvision_events_allowed(path)") < timeline < media.index("access.llmvision_events(timeline)")
@@ -105,7 +107,28 @@ def test_nothing_is_signed_without_asking_the_policy():
     assert branch.index("self._access.path_allowed(") < branch.index("self._refuse(")
     for name in ("view.py", "mirror.py", "coordinator.py", "data.py", "mirror_core.py"):
         text = (PACKAGE / name).read_text(encoding="utf-8")
-        assert text.count("async_sign_path(\n") == (3 if name == "view.py" else 0), name
+        assert text.count("async_sign_path(\n") == (4 if name == "view.py" else 0), name
+
+
+def test_a_visitor_cannot_talk_through_a_camera():
+    """A live stream's socket would take a microphone. No link to it is ever
+    signed for a visitor; the public endpoint opens it, as the viewer, with a
+    link that never leaves the server, and passes on from the visitor only
+    what policy.stream_request lets through. The page is told to offer no
+    microphone at all."""
+    view = (PACKAGE / "view.py").read_text(encoding="utf-8")
+    stream = view[view.index("async def _serve_stream"):view.index("async def _serve_page")]
+    assert stream.count("upstream.send_") == 1 and "await upstream.send_str(passed)" in stream
+    assert stream.index("passed = stream_request(message.data)") < stream.index("upstream.send_str(passed)")
+    assert "signed" not in stream[stream.index("socket = web.WebSocketResponse"):], "the link stays here"
+    assert 'response.headers["Permissions-Policy"] = "microphone=(), camera=(), display-capture=()"' in view
+    policy = (PACKAGE / "policy.py").read_text(encoding="utf-8")
+    frigate = policy[policy.index("def _frigate_path_allowed"):policy.index("def stream_socket_allowed")]
+    assert '"mse"' not in frigate and '"webrtc"' not in frigate
+    mirror = (PACKAGE / "mirror.py").read_text(encoding="utf-8")
+    branch = mirror[mirror.index('elif kind == "auth/sign_path":'):]
+    assert branch.index("self._access.stream_socket_allowed(path)") < branch.index("self._access.path_allowed(")
+    assert 'offer = listen_only_sdp(msg.get("offer"))' in mirror
 
 
 def test_templates_are_rendered_only_written_or_watched():

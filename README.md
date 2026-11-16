@@ -26,7 +26,7 @@
 | **Cards that write their own templates** | A template some card assembles in the browser (a [Dashboard References](https://github.com/FortranFour/dashboard-references) token filled in, for one) is rendered as long as it reads only published entities. |
 | **Conditional cards and visibility** | Since Home Assistant 2026.11 the server, not the browser, decides whether a conditional card or a card with a `visibility` shows. Those questions are answered for visitors too, as long as they compare published entities or are conditions you wrote in a published view. |
 | **Maps, energy, LLM Vision** | Map cards get their background tiles. Energy and power cards get the sensors the energy settings list. The [LLM Vision card](https://github.com/valentinfrlch/llmvision-card) gets the timeline of published cameras, with pictures. |
-| **Cameras** | Pictures always; live streams (HLS, WebRTC) for cameras on a published view, unless switched off. |
+| **Cameras** | Pictures always; live streams (HLS, WebRTC) for cameras on a published view, unless switched off. Picture and sound only: two-way talk never works for a visitor. |
 | **Frigate** | Cards can list events and reviews, show thumbnails and snapshots, play clips and recordings, and open live streams, for published cameras only. Works with the [Advanced Camera Card](https://github.com/dermotduffy/advanced-camera-card) and the [Wildlife Card](https://github.com/FortranFour/wildlife-card). |
 | **Less about your home** | Visitors' browsers no longer receive the home's coordinates and name, folders and addresses of the installation, devices that are not on a published view, or any device's MAC address, serial number and configuration link. Logbook lines do not say who or what caused them. |
 
@@ -89,6 +89,7 @@ For published cameras, cards can list events and reviews, receive new ones as th
 - a thumbnail, snapshot or clip is served only for an event that was first listed to a visitor that way, so guessing an event id opens nothing;
 - recordings, previews and live streams are checked by camera name;
 - marking a review as seen and keeping an event are changes, and stay refused like every other change;
+- **live streams are for watching and listening, never for talking.** A camera card's live stream runs over go2rtc's socket, and go2rtc will play a browser's microphone on the camera's loudspeaker if asked. A visitor is therefore never given a link to that socket. Public Access opens it for them and passes on only requests to watch; a WebRTC offer is rewritten to receive-only before go2rtc sees it (Home Assistant's own camera streams the same way). The page also forbids the browser the microphone, and camera cards are sent with their talk button switched off;
 - go2rtc's own stream list, which can show camera logins, is never served. The description of one published stream, which camera cards read to learn whether it has sound, is served without the camera's address on your network and without who else is watching.
 
 Home Assistant gives every camera and image entity a token in its state, which opens that entity's snapshot (and, for cameras that have one, its MJPEG stream). A visitor's browser needs that token to draw the picture, so it has it; it rotates every few minutes and opens nothing else.

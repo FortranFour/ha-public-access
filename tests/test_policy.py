@@ -47,9 +47,14 @@ ALLOWED = [
     "/api/frigate/frigate/clips/review/thumb-front-1700000000.5-rev.webp",
     "/api/frigate/frigate/clips/front-door-1700000000.9-xyz.jpg",
     "/api/frigate/frigate/jsmpeg/front",
+]
+
+# A live stream's socket: reached through the public endpoint, never signed.
+SOCKETS = [
     "/api/frigate/frigate/mse/api/ws?src=front",
     "/api/frigate/frigate/webrtc/api/ws?src=front-door",
     "/api/frigate/frigate/go2rtc/ws/api/ws?src=front",
+    "/api/frigate/mse/api/ws?src=front",
     "/api/frigate/frigate/mse/api/ws?src=front_sub",  # a stream name the owner wrote in a view
 ]
 
@@ -87,6 +92,7 @@ REFUSED = [
     "/api/frigate/frigate/mse/api/ws",
     "/api/frigate/frigate/mse/api/ws?src=front&src=bedroom",
     "/api/frigate/frigate/mse/api/ws?src=bedroom&src=front",
+    *SOCKETS,  # go2rtc would take a microphone over one
     "/api/frigate/frigate/go2rtc/api/streams",  # can list camera logins
     "/api/frigate/frigate/go2rtc/api/streams?src=front",
     "/api/frigate/other-instance/thumbnail/1700000000.1-abc",
@@ -126,7 +132,7 @@ def test_without_frigate_or_without_a_published_camera_nothing_of_frigate_is_ser
 
 def test_live_streams_can_be_switched_off():
     made = access(camera_streams=False)
-    assert not made.path_allowed("/api/frigate/frigate/mse/api/ws?src=front")
+    assert not made.stream_socket_allowed("/api/frigate/frigate/mse/api/ws?src=front")
     assert made.path_allowed("/api/frigate/frigate/thumbnail/1700000000.1-abc"), "pictures stay"
 
 
@@ -475,3 +481,101 @@ def test_a_condition_cannot_be_made_endlessly_large():
     one = {"condition": "state", "entity_id": "sensor.pv", "state": "on"}
     assert access().condition_allowed({"condition": "and", "conditions": [one] * 150})
     assert not access().condition_allowed({"condition": "and", "conditions": [one] * 250})
+
+
+# -- live streams: to watch and to listen to, never to talk through ------------
+
+@pytest.mark.parametrize("path", SOCKETS)
+def test_a_published_streams_socket_is_served_by_the_public_endpoint(path):
+    assert access().stream_socket_allowed(path)
+    assert not access().path_allowed(path), "and never signed"
+
+
+@pytest.mark.parametrize("path", [
+    "/api/frigate/frigate/mse/api/ws?src=bedroom",
+    "/api/frigate/frigate/mse/api/ws",
+    "/api/frigate/frigate/mse/api/ws?dst=front",                 # would make the visitor a source
+    "/api/frigate/frigate/mse/api/ws?src=front&dst=front",
+    "/api/frigate/frigate/mse/api/ws?src=front&src=bedroom",
+    "/api/frigate/frigate/mse/api/ws?src=front&video=copy",
+    "/api/frigate/frigate/mse/api/ws?src=rtsp://10.0.0.9/stream",  # go2rtc would open it
+    "/api/frigate/frigate/mse/api/streams?src=front",
+    "/api/frigate/frigate/mse/api/webrtc?src=front",
+    "/api/frigate/frigate/go2rtc/api/ws?src=front",
+    "/api/frigate/frigate/go2rtc/ws/api/streams?src=front",
+    "/api/frigate/frigate/mse/api/../api/ws?src=front",
+    "/api/frigate/elsewhere/mse/api/ws?src=front",
+    "https://example.com/api/frigate/frigate/mse/api/ws?src=front",
+    "/api/frigate/frigate/jsmpeg/front",
+    None,
+])
+def test_nothing_else_is_a_stream_socket(path):
+    assert not access().stream_socket_allowed(path)
+
+
+OFFER = "\r\n".join([
+    "v=0", "o=- 1 2 IN IP4 127.0.0.1", "s=-", "t=0 0", "a=sendrecv", "a=group:BUNDLE 0 1 2 3",
+    "m=video 9 UDP/TLS/RTP/SAVPF 96", "c=IN IP4 0.0.0.0", "a=mid:0", "a=recvonly", "a=rtpmap:96 H264/90000",
+    "m=audio 9 UDP/TLS/RTP/SAVPF 111", "a=mid:1", "a=sendrecv", "a=rtpmap:111 opus/48000/2", "a=sendonly",
+    "m=audio 9 UDP/TLS/RTP/SAVPF 0", "a=mid:2", "a=rtpmap:0 PCMU/8000",
+    "m=audio 0 UDP/TLS/RTP/SAVPF 8", "a=mid:4", "a=inactive",
+    "m=application 9 UDP/DTLS/SCTP webrtc-datachannel", "a=mid:3", "",
+])
+
+
+def _directions(sdp):
+    parts, kind = [], None
+    for line in sdp.split("\r\n"):
+        if line.startswith("m="):
+            kind = line[2:].split(" ")[0]
+            parts.append([kind])
+        elif line in ("a=sendrecv", "a=sendonly", "a=recvonly", "a=inactive"):
+            (parts[-1] if parts else parts).append(line[2:])
+    return parts
+
+
+def test_a_webrtc_offer_is_made_receive_only():
+    made = policy.listen_only_sdp(OFFER)
+    assert _directions(made) == [
+        ["video", "recvonly"],
+        ["audio", "recvonly"],     # said "both ways", and then "send"
+        ["audio", "recvonly"],     # said nothing, which means both ways
+        ["audio", "inactive"],     # off stays off
+        ["application"],
+    ]
+    assert "send" not in made and made.endswith("\r\n")
+    assert made.count("\r\n") == OFFER.count("\r\n") - 2 + 1, "one line less for the session, one less doubled, one added"
+    assert "a=rtpmap:111 opus/48000/2" in made and "a=group:BUNDLE 0 1 2 3" in made
+    assert policy.listen_only_sdp(made) == made
+    bare = policy.listen_only_sdp(OFFER.replace("\r\n", "\n"))
+    assert "\r" not in bare and bare.replace("\n", "\r\n") == made, "line endings are kept as they came"
+
+
+@pytest.mark.parametrize("sdp", [None, 5, "", "hello", {"sdp": OFFER}, "m=audio 9 x 0\r\n" * 20000])
+def test_what_is_not_an_offer_is_not_passed_on(sdp):
+    assert policy.listen_only_sdp(sdp) is None
+
+
+def test_a_visitor_may_ask_a_stream_only_to_watch():
+    assert json.loads(policy.stream_request('{"type":"mse","value":"avc1.640029,mp4a.40.2"}')) == {
+        "type": "mse", "value": "avc1.640029,mp4a.40.2"}
+    assert json.loads(policy.stream_request('{"type":"mse"}')) == {"type": "mse", "value": ""}
+    candidate = '{"type":"webrtc/candidate","value":"candidate:1 1 udp 2 192.0.2.1 5000 typ host"}'
+    assert json.loads(policy.stream_request(candidate))["value"].startswith("candidate:1")
+    offered = json.loads(policy.stream_request(json.dumps({"type": "webrtc/offer", "value": OFFER, "extra": 1})))
+    assert set(offered) == {"type", "value"} and "send" not in offered["value"]
+
+
+@pytest.mark.parametrize("text", [
+    '{"type":"webrtc","value":{"type":"offer","sdp":"m=audio"}}',   # go2rtc's older form
+    '{"type":"webrtc/offer","value":"not an offer"}',
+    '{"type":"webrtc/offer","value":{"sdp":"m=audio 9 x 0"}}',
+    '{"type":"webrtc/answer","value":"m=audio 9 x 0"}',
+    '{"type":"mse","value":["avc1"]}',
+    '{"type":"ptz","value":"left"}',
+    '{"type":"mse"} {"type":"webrtc"}',
+    '["mse"]', "mse", "", None, b"\x00\x01",
+    '{"type":"mse","value":"' + "a" * 70000 + '"}',
+])
+def test_anything_else_sent_to_a_stream_is_dropped(text):
+    assert policy.stream_request(text) is None

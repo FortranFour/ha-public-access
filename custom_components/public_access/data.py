@@ -231,6 +231,43 @@ async def async_fetch_own_json(hass: HomeAssistant, signed_path: str) -> Any | N
     return None
 
 
+async def async_open_own_socket(hass: HomeAssistant, signed_path: str) -> Any | None:
+    """Open a websocket on this Home Assistant's own HTTP interface.
+
+    Used for a live stream's socket, which a visitor is not given a link to:
+    it is opened from here, over the loopback address, with a link signed for
+    the read-only viewer, and the public endpoint stands in between. Returns
+    the open socket (the caller closes it), or None when it cannot be opened.
+    """
+    try:
+        from aiohttp import ClientError, WSServerHandshakeError
+
+        from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+        api = hass.config.api
+        if api is None:
+            return None
+        scheme = "wss" if api.use_ssl else "ws"
+        session = async_get_clientsession(hass, verify_ssl=False)
+        for host in ("127.0.0.1", api.local_ip):
+            try:
+                return await session.ws_connect(
+                    f"{scheme}://{host}:{api.port}{signed_path}",
+                    timeout=10,
+                    heartbeat=30,
+                    # Video arrives in pieces of any size.
+                    max_msg_size=0,
+                )
+            except WSServerHandshakeError as err:
+                _LOGGER.debug("Own socket answered %s", err.status)
+                return None
+            except (OSError, ClientError):
+                continue  # not listening on this address: try the next
+    except Exception:  # noqa: BLE001 - a stream that does not start is not worth a failed page
+        _LOGGER.debug("Could not open a socket on Home Assistant's own interface", exc_info=True)
+    return None
+
+
 async def async_uix_foundries(hass: HomeAssistant) -> dict[str, Any] | None:
     """UIX's foundries (shared card definitions), as UIX hands them to its
     frontend; None when UIX is not installed.

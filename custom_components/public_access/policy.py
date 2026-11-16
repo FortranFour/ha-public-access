@@ -491,11 +491,47 @@ class Access:
                 return len(tail) >= 3 and frigate.event_allowed(tail[1])
             cameras = [part for part in tail[:-1] if part in frigate.known]
             return len(cameras) == 1 and frigate.camera_allowed(cameras[0])
-        if kind in ("mse", "webrtc") or (kind == "go2rtc" and tail[0] == "ws"):
-            return self._stream_allowed(query.get("src"))
+        # A live stream's socket (mse, webrtc, go2rtc/ws) is never signed: a
+        # visitor holding a link to it could talk to go2rtc directly, and
+        # go2rtc lets a browser send sound to the camera's loudspeaker. It is
+        # reached through the public endpoint only (stream_socket_allowed).
         # The rest of go2rtc's own API can describe stream sources, camera
         # logins included: never.
         return False
+
+    def stream_socket_allowed(self, raw: Any) -> bool:
+        """Is this the socket of one published live stream
+        (``/api/frigate/<instance>/mse/api/ws?src=<stream>``, the same under
+        ``webrtc`` or ``go2rtc/ws``)?
+
+        Such a socket is go2rtc's, and go2rtc takes more over it than it
+        gives: a browser can offer it a microphone, and it plays that on the
+        camera's loudspeaker. So a visitor is never given a link to it. The
+        public endpoint opens it for them and passes on only requests to
+        watch (``stream_request``)."""
+        frigate = self.frigate
+        if frigate is None or not frigate.cameras or not isinstance(raw, str):
+            return False
+        parts = urlsplit(raw)
+        if parts.scheme or parts.netloc or parts.fragment:
+            return False
+        path = unquote(parts.path) if "%" in parts.path else parts.path
+        if not _SAFE_PATH.match(path) or "//" in path or ".." in path:
+            return False
+        pairs = parse_qsl(parts.query, keep_blank_values=True)
+        # "src" and nothing else: "dst" would make the visitor a source, and
+        # a second "src" is read differently by different readers.
+        if len(pairs) != 1 or pairs[0][0] != "src":
+            return False
+        segments = path.split("/")[1:]
+        if segments[:2] != ["api", "frigate"]:
+            return False
+        rest = segments[2:]
+        if rest and rest[0] in frigate.instances:
+            rest = rest[1:]
+        if rest not in (["mse", "api", "ws"], ["webrtc", "api", "ws"], ["go2rtc", "ws", "api", "ws"]):
+            return False
+        return self._stream_allowed(pairs[0][1])
 
     # -- LLM Vision -----------------------------------------------------------
 
@@ -676,6 +712,82 @@ def _strip_extension(name: str) -> str:
 def frigate_cameras_in(strings: Iterable[str], known: set[str]) -> set[str]:
     """Frigate camera names written in the published views."""
     return {value for value in strings if value in known}
+
+
+# What a page may ask of a live stream's socket: to be sent video in one of
+# go2rtc's forms, or to set up a WebRTC connection it only receives on.
+STREAM_REQUESTS = frozenset({"mse", "mp4", "mjpeg", "hls", "webrtc/offer", "webrtc/candidate"})
+MAX_STREAM_REQUEST = 64 * 1024
+_SDP_DIRECTIONS = frozenset({"a=sendrecv", "a=sendonly", "a=recvonly", "a=inactive"})
+
+
+def listen_only_sdp(sdp: Any) -> str | None:
+    """A WebRTC offer that asks only to receive.
+
+    A browser's offer says, for sound and for picture, whether it wants to
+    send as well. One that sends sound is how a visitor would talk through a
+    camera's loudspeaker, so every audio and video part is set to receive
+    only, whatever it said, and a part that said nothing (which means "both
+    ways") is told so too. Parts switched off stay off. None if this is not
+    an offer at all."""
+    if not isinstance(sdp, str) or "m=" not in sdp or len(sdp) > MAX_STREAM_REQUEST:
+        return None
+    ending = "\r\n" if "\r\n" in sdp else "\n"
+    out: list[str] = []
+    media: str | None = None  # kind of the part being read
+    stated = False
+
+    def close() -> None:
+        if media in ("audio", "video") and not stated:
+            out.append("a=recvonly")
+
+    for line in sdp.replace("\r\n", "\n").split("\n"):
+        if line.startswith("m="):
+            close()
+            media, stated = line[2:].split(" ", 1)[0], False
+            out.append(line)
+        elif line.strip() in _SDP_DIRECTIONS:
+            if media is None:
+                continue  # for the whole session: each part gets its own
+            if media in ("audio", "video"):
+                if stated:
+                    continue
+                stated = True
+                out.append("a=inactive" if line.strip() == "a=inactive" else "a=recvonly")
+            else:
+                out.append(line)
+        elif line == "" and media is not None:
+            continue  # the blank after the last line; put back below
+        else:
+            out.append(line)
+    close()
+    text = ending.join(out)
+    return text if text.endswith(ending) else text + ending
+
+
+def stream_request(text: Any) -> str | None:
+    """What a visitor's page sent a live stream's socket, as it may be passed
+    on to go2rtc, or None if it may not.
+
+    Passed on: a request for video in one of go2rtc's forms, and the two
+    messages that set up WebRTC, the offer made receive-only. Everything
+    else go2rtc understands (older message forms among them) is not."""
+    if not isinstance(text, str) or len(text) > MAX_STREAM_REQUEST:
+        return None
+    try:
+        message = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(message, dict) or message.get("type") not in STREAM_REQUESTS:
+        return None
+    value = message.get("value", "")
+    if not isinstance(value, str):
+        return None
+    if message["type"] == "webrtc/offer":
+        value = listen_only_sdp(value)
+        if value is None:
+            return None
+    return json.dumps({"type": message["type"], "value": value})
 
 
 _STREAM_PRIVATE_KEYS = frozenset({"url", "remote_addr", "user_agent", "source", "sdp"})

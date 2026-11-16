@@ -106,11 +106,38 @@ def publish_config(
                 views.append({k: v for k, v in view.items() if k != "visible"})
         elif view_selected(view, index, support):
             views.append({**view, "visible": False})
-    out: dict[str, Any] = {**config, "views": views}
+    out: dict[str, Any] = {**config, "views": without_talk(views)}
     if title:
         out["title"] = title
     if dashboard and public_path:
         out = rewrite_paths(out, dashboard, public_path)
+    return out
+
+
+# Camera cards with a talk (microphone) button.
+_TALKING_CARDS = frozenset({"custom:advanced-camera-card", "custom:frigate-card"})
+
+
+def without_talk(node: Any) -> Any:
+    """Dashboard configuration with every camera card's microphone switched
+    off: no talk button, no microphone held open.
+
+    This only tidies the page. What stops a visitor from talking through a
+    camera is the stream endpoint, which passes on nothing a visitor sends
+    but a request to watch, and the page's own ban on the microphone."""
+    if isinstance(node, list):
+        return [without_talk(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out = {key: without_talk(value) for key, value in node.items()}
+    if out.get("type") in _TALKING_CARDS:
+        menu = out.get("menu") if isinstance(out.get("menu"), dict) else {}
+        buttons = menu.get("buttons") if isinstance(menu.get("buttons"), dict) else {}
+        button = buttons.get("microphone") if isinstance(buttons.get("microphone"), dict) else {}
+        out["menu"] = {**menu, "buttons": {**buttons, "microphone": {**button, "enabled": False}}}
+        live = out.get("live") if isinstance(out.get("live"), dict) else {}
+        held = live.get("microphone") if isinstance(live.get("microphone"), dict) else {}
+        out["live"] = {**live, "microphone": {**held, "always_connected": False}}
     return out
 
 

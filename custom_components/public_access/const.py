@@ -85,3 +85,7 @@ RESERVED_PATHS: Final[frozenset[str]] = frozenset(
 # get 503 + Retry-After instead of adding load.
 MAX_PUBLIC_SESSIONS = 25
 MAX_SESSIONS_PER_CLIENT = 4
+# Live camera streams open at once, in total and per visitor address. A page
+# of camera cards opens one for each camera it shows.
+MAX_PUBLIC_STREAMS = 96
+MAX_STREAMS_PER_CLIENT = 24

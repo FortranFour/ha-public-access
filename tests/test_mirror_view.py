@@ -393,8 +393,29 @@ def test_a_template_error_is_passed_on_as_home_assistant_words_it():
 
 
 def test_a_whole_address_is_signed_as_its_path():
-    _, wire = _ask(type="auth/sign_path", path="https://home.example.com/api/frigate/frigate/mse/api/ws?src=Front")
-    assert wire.forwarded[0]["path"] == "/api/frigate/frigate/mse/api/ws?src=Front"
+    _, wire = _ask(type="auth/sign_path", path="https://home.example.com/api/frigate/frigate/jsmpeg/Front")
+    assert wire.forwarded[0]["path"] == "/api/frigate/frigate/jsmpeg/Front"
+
+
+def test_a_live_streams_socket_is_never_signed():
+    """go2rtc would take a microphone over it. The page is sent to the public
+    endpoint instead, which passes on only requests to watch."""
+    for asked in ("/api/frigate/frigate/mse/api/ws?src=Front",
+                  "https://home.example.com/api/frigate/frigate/webrtc/api/ws?src=Front"):
+        _, wire = _ask(type="auth/sign_path", path=asked)
+        assert not wire.forwarded
+        assert wire.answers[0]["result"] == {"path": "/solar" + asked[asked.index("/api/"):]}
+    _, wire = _ask(type="auth/sign_path", path="/api/frigate/frigate/mse/api/ws?dst=Front")
+    assert not wire.forwarded and _refused(wire)
+
+
+def test_home_assistants_own_webrtc_is_made_receive_only():
+    offer = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=sendrecv\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+    _, wire = _ask(type="camera/webrtc/offer", entity_id="camera.front", offer=offer)
+    sent = wire.forwarded[0]["offer"]
+    assert "send" not in sent and sent.count("a=recvonly") == 2
+    _, wire = _ask(type="camera/webrtc/offer", entity_id="camera.front", offer="nonsense")
+    assert not wire.forwarded and _refused(wire)
 
 
 def test_a_streams_description_is_served_cleaned_never_signed():
