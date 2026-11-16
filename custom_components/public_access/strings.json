@@ -35,11 +35,16 @@
         "data": {
           "more_dashboards": "Further dashboards",
           "energy": "Energy dashboard",
-          "frigate_ui": "Frigate's own interface (read-only)"
+          "frigate_ui": "Frigate's own interface (read-only)",
+          "frigate_ui_url": "Frigate's address for signing in (its port 8971)",
+          "frigate_ui_user": "Frigate user that visitors look as",
+          "frigate_ui_password": "That user's password"
         },
         "data_description": {
           "more_dashboards": "Each is shown whole unless you choose its views in the next step.",
-          "frigate_ui": "Live view, review, explore and recordings of the Frigate cameras ticked below, and no others. No settings, no deleting, no exports, no camera control."
+          "frigate_ui": "Live view, review, explore and recordings of the Frigate cameras ticked below, and no others. No settings, no deleting, no exports, no camera control.",
+          "frigate_ui_url": "Not the address the Frigate integration uses: on port 5000 Frigate treats everyone as administrator. Usually https, same host, port 8971.",
+          "frigate_ui_user": "Make it in Frigate (Settings → Users) with a role limited to the cameras to show. Never an administrator. What that role may see is what visitors see; if it can see a camera this link does not publish, the Frigate panel shows nothing."
         }
       },
       "more_views": {
@@ -57,7 +62,11 @@
       "no_views": "Pick at least one view.",
       "path_taken": "Another link already has that address, or one that begins the same way.",
       "expiry_past": "That moment has already passed.",
-      "invalid_expiry": "Not a date and time."
+      "invalid_expiry": "Not a date and time.",
+      "frigate_missing": "Fill in Frigate's address, the user and the password, or switch the Frigate interface off.",
+      "frigate_cannot_connect": "Frigate could not be reached at that address (expected: https, port 8971).",
+      "frigate_invalid_auth": "Frigate did not accept that user name and password.",
+      "frigate_is_admin": "That Frigate account is an administrator. Use one with a role limited to the cameras to show."
     },
     "abort": {
       "no_dashboards": "No dashboard has a saved configuration yet. Create a dashboard, add cards, save it, then set this up."
@@ -87,7 +96,10 @@
           "energy": "Energy dashboard",
           "frigate_ui": "Frigate's own interface (read-only)",
           "valid_for": "Valid for (counted from now)",
-          "expires_at": "Or: ends on (date and time)"
+          "expires_at": "Or: ends on (date and time)",
+          "frigate_ui_url": "Frigate's address for signing in (its port 8971)",
+          "frigate_ui_user": "Frigate user that visitors look as",
+          "frigate_ui_password": "That user's password"
         },
         "data_description": {
           "support_views": "For cards that reuse something from another tab: reference cards, popups, a 3D floor plan whose popups show cards kept elsewhere. A supporting view has no tab, but a visitor who looks for it can read it, so it must hold nothing private.",
@@ -99,7 +111,9 @@
           "valid_for": "For example 2 hours, or 7 days. When set, it replaces the date below.",
           "expires_at": "Empty: the link does not end by itself. From that moment the address answers 'not found' and everyone looking is disconnected.",
           "frigate_ui": "Live view, review, explore and recordings of the Frigate cameras ticked below, and no others. No settings, no deleting, no exports, no camera control.",
-          "more_dashboards": "Each is shown whole unless you choose its views in the next step."
+          "more_dashboards": "Each is shown whole unless you choose its views in the next step.",
+          "frigate_ui_url": "Not the address the Frigate integration uses: on port 5000 Frigate treats everyone as administrator. Usually https, same host, port 8971.",
+          "frigate_ui_user": "Make it in Frigate (Settings → Users) with a role limited to the cameras to show. Never an administrator. What that role may see is what visitors see; if it can see a camera this link does not publish, the Frigate panel shows nothing."
         }
       },
       "more_views": {
@@ -118,7 +132,11 @@
       "no_views": "Pick at least one view.",
       "path_taken": "Another link already has that address, or one that begins the same way.",
       "expiry_past": "That moment has already passed.",
-      "invalid_expiry": "Not a date and time."
+      "invalid_expiry": "Not a date and time.",
+      "frigate_missing": "Fill in Frigate's address, the user and the password, or switch the Frigate interface off.",
+      "frigate_cannot_connect": "Frigate could not be reached at that address (expected: https, port 8971).",
+      "frigate_invalid_auth": "Frigate did not accept that user name and password.",
+      "frigate_is_admin": "That Frigate account is an administrator. Use one with a role limited to the cameras to show."
     }
   },
   "issues": {

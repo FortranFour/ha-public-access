@@ -26,7 +26,12 @@ async def async_get_config_entry_diagnostics(
     return {
         "public_path": options.get(CONF_PUBLIC_PATH),
         # A license key saved by a version before 0.5 is left out.
-        "options": {k: v for k, v in options.items() if k not in ("license_key", "license_server")},
+        # ... and so is the password of the Frigate account for visitors.
+        "options": {
+            k: ("(set)" if k == "frigate_ui_password" and v else v)
+            for k, v in options.items()
+            if k not in ("license_key", "license_server")
+        },
         "published": report,
         "last_visit": _last_visit(hass, options.get(CONF_PUBLIC_PATH)),
     }

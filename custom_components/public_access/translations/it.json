@@ -35,11 +35,16 @@
         "data": {
           "more_dashboards": "Altre dashboard",
           "energy": "Dashboard Energia",
-          "frigate_ui": "Interfaccia di Frigate (sola lettura)"
+          "frigate_ui": "Interfaccia di Frigate (sola lettura)",
+          "frigate_ui_url": "Indirizzo di Frigate per l'accesso (porta 8971)",
+          "frigate_ui_user": "Utente Frigate con cui guardano i visitatori",
+          "frigate_ui_password": "Password di quell'utente"
         },
         "data_description": {
           "more_dashboards": "Ognuna è mostrata per intero, a meno che tu non ne scelga le viste nel passaggio successivo.",
-          "frigate_ui": "Diretta, revisione, esplorazione e registrazioni delle telecamere Frigate selezionate sotto, e di nessun'altra. Niente impostazioni, eliminazioni, esportazioni o controllo delle telecamere."
+          "frigate_ui": "Diretta, revisione, esplorazione e registrazioni delle telecamere Frigate selezionate sotto, e di nessun'altra. Niente impostazioni, eliminazioni, esportazioni o controllo delle telecamere.",
+          "frigate_ui_url": "Non l'indirizzo usato dall'integrazione Frigate: sulla porta 5000 Frigate tratta chiunque come amministratore. Di solito https, stesso host, porta 8971.",
+          "frigate_ui_user": "Crealo in Frigate (Impostazioni → Utenti) con un ruolo limitato alle telecamere da mostrare. Mai un amministratore. Ciò che quel ruolo può vedere è ciò che vedono i visitatori; se può vedere una telecamera che questo link non pubblica, il pannello Frigate non mostra nulla."
         }
       },
       "more_views": {
@@ -57,7 +62,11 @@
       "no_views": "Scegli almeno una vista.",
       "path_taken": "Un altro link ha già quell'indirizzo, o uno che inizia allo stesso modo.",
       "expiry_past": "Quel momento è già passato.",
-      "invalid_expiry": "Non è una data e ora valida."
+      "invalid_expiry": "Non è una data e ora valida.",
+      "frigate_missing": "Inserisci l'indirizzo di Frigate, l'utente e la password, oppure disattiva l'interfaccia di Frigate.",
+      "frigate_cannot_connect": "Impossibile raggiungere Frigate a quell'indirizzo (previsto: https, porta 8971).",
+      "frigate_invalid_auth": "Frigate non ha accettato quel nome utente e quella password.",
+      "frigate_is_admin": "Quell'account Frigate è un amministratore. Usane uno con un ruolo limitato alle telecamere da mostrare."
     },
     "abort": {
       "no_dashboards": "Nessuna dashboard ha una configurazione salvata. Crea una dashboard, aggiungi le card, salvala e poi configura questa integrazione."
@@ -87,7 +96,10 @@
           "energy": "Dashboard Energia",
           "frigate_ui": "Interfaccia di Frigate (sola lettura)",
           "valid_for": "Valido per (a partire da ora)",
-          "expires_at": "Oppure: termina il (data e ora)"
+          "expires_at": "Oppure: termina il (data e ora)",
+          "frigate_ui_url": "Indirizzo di Frigate per l'accesso (porta 8971)",
+          "frigate_ui_user": "Utente Frigate con cui guardano i visitatori",
+          "frigate_ui_password": "Password di quell'utente"
         },
         "data_description": {
           "support_views": "Per le card che riusano qualcosa da un'altra scheda: card di riferimento, popup, una planimetria 3D i cui popup mostrano card tenute altrove. Una vista di supporto non ha una scheda, ma un visitatore che la cerca può leggerla: non deve contenere nulla di privato.",
@@ -99,7 +111,9 @@
           "valid_for": "Per esempio 2 ore, oppure 7 giorni. Se impostato, sostituisce la data qui sotto.",
           "expires_at": "Vuoto: il link non termina da solo. Da quel momento l'indirizzo risponde 'non trovato' e chi sta guardando viene disconnesso.",
           "frigate_ui": "Diretta, revisione, esplorazione e registrazioni delle telecamere Frigate selezionate sotto, e di nessun'altra. Niente impostazioni, eliminazioni, esportazioni o controllo delle telecamere.",
-          "more_dashboards": "Ognuna è mostrata per intero, a meno che tu non ne scelga le viste nel passaggio successivo."
+          "more_dashboards": "Ognuna è mostrata per intero, a meno che tu non ne scelga le viste nel passaggio successivo.",
+          "frigate_ui_url": "Non l'indirizzo usato dall'integrazione Frigate: sulla porta 5000 Frigate tratta chiunque come amministratore. Di solito https, stesso host, porta 8971.",
+          "frigate_ui_user": "Crealo in Frigate (Impostazioni → Utenti) con un ruolo limitato alle telecamere da mostrare. Mai un amministratore. Ciò che quel ruolo può vedere è ciò che vedono i visitatori; se può vedere una telecamera che questo link non pubblica, il pannello Frigate non mostra nulla."
         }
       },
       "more_views": {
@@ -118,7 +132,11 @@
       "no_views": "Scegli almeno una vista.",
       "path_taken": "Un altro link ha già quell'indirizzo, o uno che inizia allo stesso modo.",
       "expiry_past": "Quel momento è già passato.",
-      "invalid_expiry": "Non è una data e ora valida."
+      "invalid_expiry": "Non è una data e ora valida.",
+      "frigate_missing": "Inserisci l'indirizzo di Frigate, l'utente e la password, oppure disattiva l'interfaccia di Frigate.",
+      "frigate_cannot_connect": "Impossibile raggiungere Frigate a quell'indirizzo (previsto: https, porta 8971).",
+      "frigate_invalid_auth": "Frigate non ha accettato quel nome utente e quella password.",
+      "frigate_is_admin": "Quell'account Frigate è un amministratore. Usane uno con un ruolo limitato alle telecamere da mostrare."
     }
   },
   "issues": {

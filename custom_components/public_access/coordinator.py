@@ -92,6 +92,9 @@ class PublicDashboardCoordinator:
         # Every socket open to a visitor of this link (the page's own, live
         # streams). Closed when the link is revoked, expires or changes.
         self.sockets: set[Any] = set()
+        # The link's way into Frigate's own interface (frigate_ui.FrigateUi),
+        # made on first use.
+        self.frigate_ui: Any = None
 
     # -- configuration ---------------------------------------------------------
 
@@ -146,6 +149,9 @@ class PublicDashboardCoordinator:
             except Exception:  # noqa: BLE001 - already gone
                 pass
         self.sockets.clear()
+        if self.frigate_ui is not None and not self.active:
+            await self.frigate_ui.async_close()
+            self.frigate_ui = None
 
     @property
     def panels(self) -> list[Panel]:

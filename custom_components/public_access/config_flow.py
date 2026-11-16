@@ -38,6 +38,9 @@ from .const import (
     CONF_FRAME_ANCESTORS,
     CONF_FRIGATE_CAMERAS,
     CONF_FRIGATE_UI,
+    CONF_FRIGATE_UI_PASSWORD,
+    CONF_FRIGATE_UI_URL,
+    CONF_FRIGATE_UI_USER,
     CONF_HIDE_LOCATION,
     CONF_LOADING_BACKGROUND,
     CONF_MORE,
@@ -57,7 +60,7 @@ from .const import (
 )
 
 # Frigate's own interface for visitors: offered once frigate_ui.py is in place.
-FRIGATE_UI_READY = False
+FRIGATE_UI_READY = True
 
 PATH_PATTERN = re.compile(r"^[a-z0-9_]{2,48}$")
 COLOR_PATTERN = re.compile(r"^#(?:[0-9a-f]{3}|[0-9a-f]{6})$")
@@ -230,8 +233,45 @@ def more_fields(
     if "energy" in ha_data.registered_panel_paths(hass) or current.get(CONF_ENERGY):
         fields[vol.Required(CONF_ENERGY, default=bool(current.get(CONF_ENERGY)))] = bool
     if FRIGATE_UI_READY and (ha_data.frigate_instances(hass) or current.get(CONF_FRIGATE_UI)):
+        from . import frigate_ui
+
         fields[vol.Required(CONF_FRIGATE_UI, default=bool(current.get(CONF_FRIGATE_UI)))] = bool
+        fields[
+            vol.Optional(
+                CONF_FRIGATE_UI_URL,
+                description={"suggested_value": current.get(CONF_FRIGATE_UI_URL) or frigate_ui.default_url(hass)},
+            )
+        ] = str
+        fields[
+            vol.Optional(CONF_FRIGATE_UI_USER, description={"suggested_value": current.get(CONF_FRIGATE_UI_USER) or ""})
+        ] = str
+        fields[
+            vol.Optional(
+                CONF_FRIGATE_UI_PASSWORD,
+                description={"suggested_value": current.get(CONF_FRIGATE_UI_PASSWORD) or ""},
+            )
+        ] = selector.TextSelector(selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD))
     return fields
+
+
+async def frigate_ui_answers(hass: Any, user_input: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """The Frigate interface settings as stored, and an error key if the
+    account cannot be used. Checked only when the interface is switched on."""
+    stored = {
+        CONF_FRIGATE_UI: bool(user_input.get(CONF_FRIGATE_UI)),
+        CONF_FRIGATE_UI_URL: (user_input.get(CONF_FRIGATE_UI_URL) or "").strip().rstrip("/"),
+        CONF_FRIGATE_UI_USER: (user_input.get(CONF_FRIGATE_UI_USER) or "").strip(),
+        CONF_FRIGATE_UI_PASSWORD: user_input.get(CONF_FRIGATE_UI_PASSWORD) or "",
+    }
+    if not stored[CONF_FRIGATE_UI]:
+        return stored, None
+    if not (stored[CONF_FRIGATE_UI_URL] and stored[CONF_FRIGATE_UI_USER] and stored[CONF_FRIGATE_UI_PASSWORD]):
+        return stored, "frigate_missing"
+    from . import frigate_ui
+
+    return stored, await frigate_ui.async_check(
+        hass, stored[CONF_FRIGATE_UI_URL], stored[CONF_FRIGATE_UI_USER], stored[CONF_FRIGATE_UI_PASSWORD]
+    )
 
 
 def stored_more(
@@ -407,12 +447,17 @@ class PublicAccessConfigFlow(_MoreViews, ConfigFlow, domain=DOMAIN):
         if not fields:
             self._start_more([], {})
             return await self._more_done()
+        errors: dict[str, str] = {}
         if user_input is not None:
-            self._options[CONF_ENERGY] = bool(user_input.get(CONF_ENERGY))
-            self._options[CONF_FRIGATE_UI] = bool(user_input.get(CONF_FRIGATE_UI))
-            self._start_more(_stored_views(user_input.get(CONF_MORE) or []), {})
-            return await self.async_step_more_views()
-        return self.async_show_form(step_id="more", data_schema=vol.Schema(fields))
+            frigate, error = await frigate_ui_answers(self.hass, user_input)
+            if error:
+                errors[CONF_FRIGATE_UI] = error
+            else:
+                self._options[CONF_ENERGY] = bool(user_input.get(CONF_ENERGY))
+                self._options.update(frigate)
+                self._start_more(_stored_views(user_input.get(CONF_MORE) or []), {})
+                return await self.async_step_more_views()
+        return self.async_show_form(step_id="more", data_schema=vol.Schema(fields), errors=errors)
 
     async def _more_done(self) -> ConfigFlowResult:
         return await self.async_step_path()
@@ -443,6 +488,9 @@ class PublicAccessConfigFlow(_MoreViews, ConfigFlow, domain=DOMAIN):
                         CONF_NAME: self._options.get(CONF_NAME) or "",
                         CONF_ENERGY: bool(self._options.get(CONF_ENERGY)),
                         CONF_FRIGATE_UI: bool(self._options.get(CONF_FRIGATE_UI)),
+                        CONF_FRIGATE_UI_URL: self._options.get(CONF_FRIGATE_UI_URL) or "",
+                        CONF_FRIGATE_UI_USER: self._options.get(CONF_FRIGATE_UI_USER) or "",
+                        CONF_FRIGATE_UI_PASSWORD: self._options.get(CONF_FRIGATE_UI_PASSWORD) or "",
                         CONF_MORE: stored_more(
                             self._dashboards, self._wanted, self._views, path,
                             energy=bool(self._options.get(CONF_ENERGY)),
@@ -496,6 +544,9 @@ class PublicAccessOptionsFlow(_MoreViews, OptionsFlow):
                 expires, expiry_error = str(current.get(CONF_EXPIRES_AT)), None
             if expiry_error:
                 errors[CONF_EXPIRES_AT] = expiry_error
+            frigate, frigate_error = await frigate_ui_answers(self.hass, user_input)
+            if frigate_error:
+                errors[CONF_FRIGATE_UI] = frigate_error
             color = (user_input.get(CONF_LOADING_BACKGROUND) or "").strip().lower()
             if color and not COLOR_PATTERN.match(color):
                 errors[CONF_LOADING_BACKGROUND] = "invalid_color"
@@ -513,7 +564,7 @@ class PublicAccessOptionsFlow(_MoreViews, OptionsFlow):
                     CONF_TITLE: (user_input.get(CONF_TITLE) or "").strip(),
                     CONF_NAME: (user_input.get(CONF_NAME) or "").strip(),
                     CONF_ENERGY: bool(user_input.get(CONF_ENERGY)),
-                    CONF_FRIGATE_UI: bool(user_input.get(CONF_FRIGATE_UI)),
+                    **frigate,
                     CONF_EXPIRES_AT: expires or "",
                     CONF_FRIGATE_CAMERAS: _stored_views(user_input.get(CONF_FRIGATE_CAMERAS)),
                     # What versions before 0.6 read: the first chosen view.

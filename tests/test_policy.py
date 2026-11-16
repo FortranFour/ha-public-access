@@ -573,9 +573,80 @@ def test_a_visitor_may_ask_a_stream_only_to_watch():
     '{"type":"webrtc/answer","value":"m=audio 9 x 0"}',
     '{"type":"mse","value":["avc1"]}',
     '{"type":"ptz","value":"left"}',
+    '{"type":["mse"],"value":"x"}', '{"type":{"a":1}}',
     '{"type":"mse"} {"type":"webrtc"}',
     '["mse"]', "mse", "", None, b"\x00\x01",
     '{"type":"mse","value":"' + "a" * 70000 + '"}',
 ])
 def test_anything_else_sent_to_a_stream_is_dropped(text):
     assert policy.stream_request(text) is None
+
+
+# -- Frigate's own interface, read-only ----------------------------------------
+
+@pytest.mark.parametrize("path", [
+    "", "review", "assets/index-abc.js", "locales/en/common.json", "api/config", "api/profile", "api/stats",
+    "api/events/1700000000.1-ab/thumbnail.webp", "api/front/latest.webp", "api/review", "api/front/recordings",
+    "vod/front/start/1/end/2/master.m3u8", "clips/front-1.jpg", "live/jsmpeg/front", "live/mse/api/ws", "ws",
+])
+def test_reading_frigates_interface_is_passed_on(path):
+    assert policy.frigate_ui_path(path) == path
+    assert policy.frigate_ui_path("/" + path) == path
+
+
+@pytest.mark.parametrize("path", [
+    "api/login", "login", "api/logout", "logout", "api/auth", "api/auth/first_time_login", "api/users", "api/users/visitor/password",
+    "api/config/raw", "api/config/raw_paths", "api/config/save", "api/config/set", "api/config/schema.json",
+    "api/logs/frigate", "logs", "api/restart", "api/export/front/start/1/end/2", "export", "exports/a.mp4",
+    "api/go2rtc/webrtc", "api/ffprobe", "api/vainfo", "api/metrics", "api/chat/completion", "api/debug_replay/start",
+    "API/Login", "api/../api/login", "api//config", "api/config/../login", "api/front/latest.jpg?x=1", "api/a%2e%2e/b", "api/<script>", None, 5,
+])
+def test_the_rest_of_frigate_is_not(path):
+    assert policy.frigate_ui_path(path) is None
+
+
+def test_frigates_socket_is_asked_for_state_never_commanded():
+    passed = policy.frigate_socket_message('{"topic":"onConnect","payload":"x","retain":true,"extra":1}')
+    assert json.loads(passed) == {"topic": "onConnect", "payload": "", "retain": False}
+    for topic in ("front/ptz", "front/detect/set", "front/recordings/set", "restart", "front/motion_threshold/set", "notifications/set", ""):
+        assert policy.frigate_socket_message(json.dumps({"topic": topic, "payload": "ON"})) is None, topic
+    for text in ("onConnect", "[]", '{"topic":["onConnect"]}', None, b"x", '{"topic":"onConnect","payload":"' + "a" * 5000 + '"}'):
+        assert policy.frigate_socket_message(text) is None
+
+
+FRIGATE_CONFIG = {
+    "cameras": {name: {"name": name, "ffmpeg": {"inputs": [{"path": f"rtsp://*:*@10.0.4.{n}:554/ch1"}]},
+                       "live": {"streams": {"Main": name, "Sub": name + "_sub"}}, "onvif": {"host": f"10.0.4.{n}", "user": "admin", "password": "*"}}
+                for n, name in enumerate(["front", "bedroom", "garage"])},
+    "go2rtc": {"streams": {"front": ["rtsp://*:*@10.0.4.0/x"], "front_sub": ["rtsp://x"], "bedroom": ["rtsp://y"], "spare": ["rtsp://z"]}, "api": {"listen": ":1984"}},
+    "camera_groups": {"out": {"cameras": ["front", "garage", "bedroom", "birdseye"], "order": 0}, "in": {"cameras": ["bedroom"], "order": 1}},
+    "mqtt": {"enabled": True, "host": "core-mosquitto", "user": "frigate", "password": "*"},
+    "auth": {"enabled": True, "roles": {"admin": [], "viewer": [], "family": ["bedroom"]}, "cookie_name": "frigate_token"},
+    "proxy": {"auth_secret": "*"}, "environment_vars": {"K": "v"}, "tls": {"enabled": True}, "database": {"path": "/config/frigate.db"},
+    "genai": {"provider": "openai", "base_url": "https://api.example.com/v1", "api_key": "*"},
+    "ui": {"timezone": "Europe/Rome"}, "version": "0.18.2",
+}
+
+
+def test_frigates_configuration_is_cut_down_to_the_published_cameras():
+    out = policy.public_frigate_config(FRIGATE_CONFIG, {"front", "garage", "not_in_frigate"})
+    text = json.dumps(out)
+    assert sorted(out["cameras"]) == ["front", "garage"]
+    assert out["go2rtc"] == {"streams": {"front": [], "front_sub": []}}
+    assert out["camera_groups"] == {"out": {"cameras": ["front", "garage", "birdseye"], "order": 0}}
+    assert out["mqtt"] == {"enabled": True} and out["auth"] == {"enabled": True, "roles": {"admin": [], "viewer": []}}
+    assert out["ui"] == {"timezone": "Europe/Rome"} and out["version"] == "0.18.2"
+    for gone in ("bedroom", "10.0.4", "rtsp", "core-mosquitto", "environment_vars", "auth_secret", "frigate.db", "api.example.com", "family", "spare", '"tls"'):
+        assert gone not in text, gone
+    assert out["cameras"]["front"]["onvif"] == {"host": "", "user": "", "password": ""}
+    assert FRIGATE_CONFIG["cameras"]["bedroom"] and FRIGATE_CONFIG["mqtt"]["host"] == "core-mosquitto", "the original is untouched"
+    assert policy.public_frigate_config(["not", "a", "config"], {"front"}) == ["not", "a", "config"]
+
+
+def test_frigates_statistics_lose_other_cameras_and_command_lines():
+    stats = {"cameras": {"front": {"camera_fps": 5}, "bedroom": {"camera_fps": 5}},
+             "cpu_usages": {"12": {"cpu": "1", "cmdline": "ffmpeg -i rtsp://admin:pw@10.0.4.9/x"}, "frigate.full_system": {"cpu": "2"}},
+             "service": {"version": "0.18.2", "storage": {"/media/frigate/recordings": {"total": 1}}}}
+    out = policy.public_frigate_stats(stats, {"front"})
+    assert list(out["cameras"]) == ["front"] and "cmdline" not in json.dumps(out) and "pw@" not in json.dumps(out)
+    assert out["cpu_usages"]["12"] == {"cpu": "1"} and out["service"]["version"] == "0.18.2"

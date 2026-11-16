@@ -21,6 +21,12 @@ CONF_NAME: Final = "name"  # who the link is for; the owner's label
 CONF_MORE: Final = "more_dashboards"  # [{"dashboard", "views", "path", "title"}]
 CONF_ENERGY: Final = "energy"  # Home Assistant's Energy dashboard
 CONF_FRIGATE_UI: Final = "frigate_ui"  # Frigate's own interface, read-only
+CONF_FRIGATE_UI_URL: Final = "frigate_ui_url"  # Frigate's authenticated address (port 8971)
+CONF_FRIGATE_UI_USER: Final = "frigate_ui_user"  # the Frigate user visitors look as
+CONF_FRIGATE_UI_PASSWORD: Final = "frigate_ui_password"
+# Requests a minute from one visitor to Frigate's interface: a page of review
+# items is a few hundred pictures.
+FRIGATE_UI_RATE_LIMIT_PER_MINUTE: Final = 3000
 CONF_EXPIRES_AT: Final = "expires_at"  # ISO date and time, or empty: never
 CONF_VALID_FOR: Final = "valid_for"  # asked in the form, stored as expires_at
 CONF_ENABLED: Final = "enabled"

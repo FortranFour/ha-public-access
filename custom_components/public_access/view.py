@@ -38,6 +38,7 @@ from .const import (
     CONF_LOADING_BACKGROUND,
     CONF_NOINDEX,
     DEFAULT_CACHE_SECONDS,
+    FRIGATE_UI_RATE_LIMIT_PER_MINUTE,
     MAX_PUBLIC_SESSIONS,
     MAX_PUBLIC_STREAMS,
     MAX_SESSIONS_PER_CLIENT,
@@ -97,6 +98,7 @@ class PublicDashboardView(HomeAssistantView):
         self._media_limiter = RateLimiter(MEDIA_RATE_LIMIT_PER_MINUTE)
         self._sessions = guard.SessionLimiter(MAX_PUBLIC_SESSIONS, MAX_SESSIONS_PER_CLIENT)
         self._streams = guard.SessionLimiter(MAX_PUBLIC_STREAMS, MAX_STREAMS_PER_CLIENT)
+        self._frigate_limiter = RateLimiter(FRIGATE_UI_RATE_LIMIT_PER_MINUTE)
         self.last_visit: dict[str, Any] | None = None
 
     def rebind(self, coordinator: PublicDashboardCoordinator) -> None:
@@ -184,6 +186,8 @@ class PublicDashboardView(HomeAssistantView):
             # Another panel of the link: the same page at another address.
             # The page's socket and requests all go to the link's own.
             if panel.kind == "frigate" and (route == "ui" or route.startswith("ui/")):
+                if not self._frigate_limiter.allow(visitor):
+                    return web.Response(text="429: Too Many Requests", status=429, headers={"Retry-After": "60"})
                 return await self._serve_frigate(request, panel, extra)
             route = ""
         media = route.startswith("api/") and not route.startswith("api/history/")

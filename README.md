@@ -19,6 +19,7 @@
 | | |
 | --- | --- |
 | **Links** | Every entry of the integration is one link: its own address, its own selection of dashboards and views, its own life. Make one for each person or purpose. A link can be switched off (revoked) from its options or with its switch entity, and can end by itself after a span of time or on a date. |
+| **Frigate's own interface** | A link can put Frigate itself in the sidebar: live view, review, explore and recordings, for the cameras you allow and no others, with nothing in it that changes anything. See *Frigate's own interface* below. |
 | **More than one dashboard** | A link can show further dashboards (each with the views you tick) and Home Assistant's Energy dashboard next to its main one. Visitors get the sidebar to move between them, with nothing else of yours in it. |
 | **Several views** | Pick any number of the dashboard's tabs. Visitors get Home Assistant's own tab bar for them, without the menu, edit, search and assistant buttons. Subviews keep their back arrow. With one view, or with the tab bar switched off, the page is the view and nothing else, as before. |
 | **Links between views** | A card that navigates to `/your-dashboard/lights` goes to `/your-public-path/lights`. The dashboard's real address and name are replaced before anything is sent; a public title replaces them in the browser tab. Navigation to anything outside the published dashboard is not made. |
@@ -117,6 +118,28 @@ Home Assistant gives every camera and image entity a token in its state, which o
 
 The Frigate integration's notification links (`/api/frigate/notifications/<event>/…`) are public by its own design unless you switch that off in the Frigate integration's options. Public Access neither adds to nor takes from that.
 
+## Frigate's own interface
+
+Cards show Frigate's events on a dashboard. This shows Frigate itself, in the visitor's sidebar, read-only. It needs Frigate 0.17 or later.
+
+It is built on Frigate's own users and roles rather than on a second copy of Frigate's rules, so Frigate decides, everywhere, what a visitor's account may see:
+
+1. **In Frigate**, *Settings → Users → Roles*: add a role (say `public`) and switch on the cameras to show. A role like that is read-only by Frigate's own definition.
+2. **In Frigate**, *Settings → Users*: add a user (say `visitor`) with that role and a password.
+3. **In the link's options**, tick *Frigate's own interface* and give **Frigate's address for signing in** (its port **8971**, usually `https://<same host as the Frigate integration>:8971`), that user and its password.
+
+Why port 8971: on port 5000, which the Frigate integration and Home Assistant's own Frigate panel use, Frigate treats everyone as administrator. Public Access never fetches the interface from there.
+
+What Public Access adds on top of Frigate's enforcement:
+
+- **Only reading goes through.** Requests are fetched with GET and nothing else. Signing in and out, users, the configuration as written, logs, exports and restarting are not passed on at all.
+- **No camera control and no talking.** Frigate lets a camera's user move it (PTZ) over its socket; from a visitor only requests for state are passed on. Live streams are asked only to be watched, as for camera cards.
+- **No addresses.** Frigate's configuration and statistics reach the visitor with only the allowed cameras in them, and with every address (cameras, MQTT, anything with `://`), the sign-in settings and the server's own settings removed.
+- **The visitor never holds Frigate's cookie.** Public Access signs in and fetches; the browser gets the pages and pictures.
+- **The account is checked before anything is shown.** An administrator account is refused. If the account can see a camera the link does not publish (*Frigate cameras visitors may browse*, or a camera on a published view), the Frigate panel shows nothing and the link's diagnostics name the cameras. So the cameras ticked in the link and the cameras allowed in Frigate have to agree: tick in the link every camera the role has.
+
+The password is stored with the link's settings in Home Assistant, like other integrations' credentials, and is left out of diagnostics.
+
 ## Security
 
 - **Only reading is forwarded.** The visitor's page talks to Public Access, not to Home Assistant, and only messages that *read* are passed on. Commands, saves, scripts and arbitrary templates are refused.
@@ -146,12 +169,18 @@ A UIX lock keeps its place on the public page, but a code written in the card is
 
 Not supported: cards that pick their entities at run time from everything in Home Assistant (auto-entities, area and strategy dashboards), since only entities written in the views are sent; popups opened by a script or an automation, since those are service calls; Frigate's own web interface.
 
+**Links, further dashboards, Energy:** tested in a real Home Assistant 2026.11.1 with a browser: the sidebar, moving between panels, reloading on each, time limits running out, revoking with the switch, a second link reading only its own selection.
+
+**Frigate's own interface was tested against a stand-in for Frigate's port 8971**, not a Frigate server: signing in, the role check, the address under the link, what is refused, the sockets, the cut-down configuration. **Frigate 0.18's real interface has not been run through it.** If a page of it stays empty, the link's diagnostics list what was not passed on.
+
 ## Limits
 
 | | |
 | --- | --- |
 | **Visitors at once** | Up to 25, and 4 per address; past that, new visitors are asked to retry |
 | **Requests** | 60 pages a minute per visitor address, and 600 pictures or clips |
+| **Live streams** | 24 at once per visitor address, 96 in all |
+| **Frigate's interface** | 3000 requests a minute per visitor address |
 | **What leaves your home** | Nothing: no account, no license server, no telemetry |
 
 ## Behind Cloudflare or Nginx Proxy Manager

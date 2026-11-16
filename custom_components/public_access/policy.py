@@ -778,7 +778,8 @@ def stream_request(text: Any) -> str | None:
         message = json.loads(text)
     except ValueError:
         return None
-    if not isinstance(message, dict) or message.get("type") not in STREAM_REQUESTS:
+    kind = message.get("type") if isinstance(message, dict) else None
+    if not isinstance(kind, str) or kind not in STREAM_REQUESTS:
         return None
     value = message.get("value", "")
     if not isinstance(value, str):
@@ -810,6 +811,130 @@ def clean_stream_info(data: Any) -> Any:
     if isinstance(data, str) and "://" in data:
         return ""
     return data
+
+
+# -- Frigate's own interface -----------------------------------------------------
+
+# What a page of Frigate's interface may send Frigate's socket: requests to be
+# told the state of things. Frigate lets a camera's user send "<camera>/ptz"
+# as well; a visitor moves no camera.
+FRIGATE_SOCKET_TOPICS = frozenset(
+    {"onConnect", "modelState", "audioTranscriptionState", "birdseyeLayout",
+     "embeddingsReindexProgress", "jobState"}
+)
+
+# Addresses of Frigate that a visitor's interface has no business with, on
+# top of Frigate's own refusal of them to anyone who is not an administrator:
+# signing in and out, users, the configuration as written, logs, exports,
+# restarting, probing a camera address, go2rtc's own answer to a WebRTC offer.
+_FRIGATE_NEVER = re.compile(
+    r"^(?:api/)?(?:login|logout|auth|users?|config/(?:raw|raw_paths|save|set|schema\.json)|logs?|restart"
+    r"|exports?|export|debug[\w/]*|metrics|ffprobe|vainfo|nvinfo|chat|go2rtc/webrtc|notifications|reolink)(?:/|$)",
+    re.IGNORECASE,
+)
+_FRIGATE_PATH = re.compile(r"^[A-Za-z0-9_\-./,:@+~ ]*$")
+_FRIGATE_SECRET_KEYS = frozenset({"password", "api_key", "auth_secret", "secret", "token", "user", "host"})
+_FRIGATE_DROPPED = ("environment_vars", "proxy", "tls", "database", "notifications", "telemetry", "logger")
+
+
+def frigate_ui_path(raw: Any) -> str | None:
+    """The address inside Frigate that a request to the public Frigate panel
+    is for, or None if it is not passed on."""
+    if not isinstance(raw, str):
+        return None
+    path = unquote(raw) if "%" in raw else raw
+    path = path.lstrip("/")
+    if not _FRIGATE_PATH.match(path) or ".." in path or "//" in path:
+        return None
+    if _FRIGATE_NEVER.match(path):
+        return None
+    return path
+
+
+def frigate_socket_message(text: Any) -> str | None:
+    """What a visitor's Frigate page sent Frigate's socket, if it may be
+    passed on: a request for state, never a command."""
+    if not isinstance(text, str) or len(text) > 4096:
+        return None
+    try:
+        message = json.loads(text)
+    except ValueError:
+        return None
+    topic = message.get("topic") if isinstance(message, dict) else None
+    if not isinstance(topic, str) or topic not in FRIGATE_SOCKET_TOPICS:
+        return None
+    return json.dumps({"topic": message["topic"], "payload": "", "retain": False})
+
+
+def _scrub(node: Any) -> Any:
+    if isinstance(node, dict):
+        return {
+            key: ("" if key in _FRIGATE_SECRET_KEYS and isinstance(value, str) else _scrub(value))
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [_scrub(item) for item in node]
+    if isinstance(node, str) and "://" in node:
+        return ""
+    return node
+
+
+def public_frigate_config(config: Any, cameras: Iterable[str]) -> Any:
+    """Frigate's configuration as a visitor's interface receives it.
+
+    Frigate already blanks passwords. It still names every camera, and where
+    each one is on the home network. Here only the published cameras stay
+    (also in groups, streams and the review order), every address is blanked,
+    and the parts about the server itself (sign-in, proxy, database, mail,
+    environment) are left out."""
+    if not isinstance(config, dict):
+        return config
+    allowed = set(cameras)
+    out = {key: value for key, value in config.items() if key not in _FRIGATE_DROPPED}
+    if isinstance(out.get("cameras"), dict):
+        out["cameras"] = {name: value for name, value in out["cameras"].items() if name in allowed}
+    streams = set(allowed)
+    for camera in (out.get("cameras") or {}).values():
+        live = (camera.get("live") or {}) if isinstance(camera, dict) else {}
+        named = live.get("streams")
+        streams |= set(named.values()) if isinstance(named, dict) else set()
+    go2rtc = out.get("go2rtc")
+    if isinstance(go2rtc, dict):
+        kept = go2rtc.get("streams") if isinstance(go2rtc.get("streams"), dict) else {}
+        out["go2rtc"] = {"streams": {name: [] for name in kept if name in streams}}
+    groups = out.get("camera_groups")
+    if isinstance(groups, dict):
+        cut = {}
+        for name, group in groups.items():
+            if not isinstance(group, dict):
+                continue
+            members = [c for c in group.get("cameras") or [] if c in allowed or c == "birdseye"]
+            if any(c in allowed for c in members):
+                cut[name] = {**group, "cameras": members}
+        out["camera_groups"] = cut
+    if isinstance(out.get("auth"), dict):
+        out["auth"] = {"enabled": bool(out["auth"].get("enabled")), "roles": {"admin": [], "viewer": []}}
+    if isinstance(out.get("mqtt"), dict):
+        out["mqtt"] = {"enabled": bool(out["mqtt"].get("enabled"))}
+    return _scrub(out)
+
+
+def public_frigate_stats(stats: Any, cameras: Iterable[str]) -> Any:
+    """Frigate's statistics with only the published cameras, and without
+    the commands its processes were started with."""
+    if not isinstance(stats, dict):
+        return stats
+    allowed = set(cameras)
+    out = dict(stats)
+    if isinstance(out.get("cameras"), dict):
+        out["cameras"] = {name: value for name, value in out["cameras"].items() if name in allowed}
+    for key in ("cpu_usages", "processes"):
+        if isinstance(out.get(key), dict):
+            out[key] = {
+                name: ({k: v for k, v in value.items() if k != "cmdline"} if isinstance(value, dict) else value)
+                for name, value in out[key].items()
+            }
+    return _scrub(out)
 
 
 def foundries_used(foundries: dict[str, Any], strings: Iterable[str]) -> dict[str, Any]:

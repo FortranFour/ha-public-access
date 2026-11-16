@@ -148,3 +148,22 @@ def test_the_mirror_filters_what_home_assistant_answers():
     assert 'self._entity_allowed(e.get("entity_id"))' in text        # entity registry
     assert "if s in self._statistics" in text                        # statistics
     assert '"entity_ids": [e for e in wanted if self._entity_allowed(e)]' in text  # history
+
+
+def test_frigates_interface_is_fetched_never_written_to():
+    """The public Frigate panel signs in to Frigate as the visitors' account
+    (the one POST there is, with the owner's settings), and from then on only
+    fetches: a visitor's request reaches Frigate as a GET of a path
+    policy.frigate_ui_path let through, or as a socket whose messages from
+    the visitor pass a filter. The view has no handler but GET."""
+    text = (PACKAGE / "frigate_ui.py").read_text(encoding="utf-8")
+    assert text.count(".post(") == 1 and '/api/login' in text[text.index(".post("):text.index(".post(") + 200]
+    assert ".put(" not in text and ".delete(" not in text and ".patch(" not in text and ".request(" not in text
+    serve = text[text.index("async def async_serve"):text.index("def _cleaner")]
+    assert serve.index("path = frigate_ui_path(rest)") < serve.index("ui.session().get(")
+    assert serve.index("cameras = await ui.async_cameras(published)") < serve.index("ui.session().get(")
+    socket = text[text.index("async def _serve_socket"):]
+    assert socket.count("upstream.send_") == 1 and "passed = check(message.data) if check else None" in socket
+    assert "Set-Cookie" not in text.replace('"""', "")[text.index("_ANSWER_HEADERS = ("):text.index("_ASK_HEADERS")]
+    view = (PACKAGE / "view.py").read_text(encoding="utf-8")
+    assert "async def post(" not in view and "async def put(" not in view and "async def delete(" not in view
