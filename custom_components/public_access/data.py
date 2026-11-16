@@ -16,6 +16,31 @@ from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 
+def panel_look(hass: HomeAssistant, url_path: str) -> dict[str, Any] | None:
+    """A sidebar panel's name and icon as the owner has them (their own
+    renaming included), or None if there is no such panel.
+
+    Read here, on the server, and not from what the read-only viewer is told
+    about panels: the owner may have made a panel administrators-only or
+    taken it out of their own sidebar, and a link that publishes it shows it
+    all the same."""
+    try:
+        from homeassistant.components import frontend
+
+        panel = (hass.data.get(frontend.DATA_PANELS, {}) or {}).get(url_path)
+        if panel is None:
+            return None
+        override = (hass.data.get(frontend.DATA_PANELS_CONFIG, {}) or {}).get(url_path) or {}
+        return {
+            "title": override.get("title") or panel.sidebar_title,
+            "icon": override.get("icon") or panel.sidebar_icon,
+            "config": panel.config,
+        }
+    except Exception:  # noqa: BLE001 - a missing icon is not worth a failed page
+        _LOGGER.debug("Could not read panel %s", url_path, exc_info=True)
+        return None
+
+
 def registered_panel_paths(hass: HomeAssistant) -> set[str]:
     """Every path the frontend already owns, including storage dashboards.
 

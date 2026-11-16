@@ -230,6 +230,9 @@ QUIET_TYPES: dict[str, Any] = {
     "persistent_notification/subscribe": None,
     "repairs/list_issues": {"issues": []},
     "uix/log": None,  # a card's note for the owner's log: dropped
+    # Which integrations are still starting, for the frontend's "starting up"
+    # note. A visitor is told nothing; the request is simply taken.
+    "subscribe_bootstrap_integrations": None,
 }
 
 _connections = 0
@@ -536,12 +539,24 @@ class MirrorSession:
         sidebar. The frontend asks for lovelace/config with a public address,
         which is turned back into the real dashboard's."""
         out: dict[str, Any] = {}
+        # Every entry is written here in full. What the viewer was told about
+        # the owner's panel is only a fallback for name and icon: the owner
+        # may keep a panel out of their own sidebar or for administrators
+        # only, and then the viewer is told it is hidden, or nothing at all.
+        shown = {"require_admin": False, "config_panel_domain": None,
+                 "show_in_sidebar": True, "default_visible": True}
         for item in self._panels_of_site():
-            source = panels.get(item.dashboard) or {} if item.dashboard else {}
+            source = (panels.get(item.dashboard) or {}) if item.dashboard else {}
+            icon = getattr(item, "icon", None) or source.get("icon")
             if item.kind == "energy":
-                if not source:
-                    continue  # the Energy dashboard is not set up
-                out[item.path] = {**source, "url_path": item.path, "require_admin": False}
+                out[item.path] = {
+                    "component_name": "energy",
+                    "icon": icon or "mdi:lightning-bolt",
+                    "title": item.title or source.get("title") or "energy",
+                    "config": source.get("config"),
+                    "url_path": item.path,
+                    **shown,
+                }
             elif item.kind == "frigate":
                 out[item.path] = {
                     "component_name": "iframe",
@@ -549,18 +564,16 @@ class MirrorSession:
                     "title": item.title or "Frigate",
                     "config": {"url": f"/{item.path}/ui/"},
                     "url_path": item.path,
-                    "require_admin": False,
-                    "config_panel_domain": None,
+                    **shown,
                 }
             else:
                 out[item.path] = {
                     "component_name": "lovelace",
-                    "icon": source.get("icon"),
+                    "icon": icon,
                     "title": item.title or source.get("title") or "Dashboard",
                     "config": {"mode": "storage"},
                     "url_path": item.path,
-                    "require_admin": False,
-                    "config_panel_domain": None,
+                    **shown,
                 }
         return out
 
@@ -607,7 +620,7 @@ class MirrorSession:
             or (kind == "call_service" and msg.get("domain") == "system_log")
         ):
             result = QUIET_TYPES.get(kind)
-            if isinstance(kind, str) and kind.endswith("/subscribe"):
+            if isinstance(kind, str) and (kind.endswith("/subscribe") or kind.startswith("subscribe_")):
                 # Remembered, so that cancelling it later is answered here too
                 # instead of reaching Home Assistant, which never heard of it.
                 self._core.silent_subscription(msg_id)

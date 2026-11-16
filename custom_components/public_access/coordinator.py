@@ -157,12 +157,18 @@ class PublicDashboardCoordinator:
     def panels(self) -> list[Panel]:
         """Everything this link shows, the main dashboard first. Each panel
         has its own public address: the link's, or the link's with a suffix."""
+        hass = getattr(self, "hass", None)
+
+        def look(url_path: str) -> dict[str, Any]:
+            return (ha_data.panel_look(hass, url_path) if hass is not None else None) or {}
+
         main = Panel(
             path=self.public_path,
             dashboard=self.dashboard,
-            title=self.public_title,
+            title=self.public_title or look(self.dashboard).get("title"),
             views=tuple(self.published_views),
             support=tuple(self.support_views),
+            icon=look(self.dashboard).get("icon"),
         )
         out = [main]
         taken = {main.path}
@@ -176,10 +182,17 @@ class PublicDashboardCoordinator:
                 path = sub_path(self.public_path, item.get("title") or item["dashboard"], taken)
             taken.add(path)
             views = tuple(str(v) for v in item.get("views") or []) or (ALL_VIEWS,)
+            seen = look(str(item["dashboard"]))
             out.append(Panel(path=path, dashboard=str(item["dashboard"]),
-                             title=(item.get("title") or None), views=views))
-        if self.options.get(CONF_ENERGY):
-            out.append(Panel(path=sub_path(self.public_path, "energy", taken), kind="energy", dashboard="energy"))
+                             title=(seen.get("title") or item.get("title") or None), views=views,
+                             icon=seen.get("icon")))
+        # The Energy dashboard, if Home Assistant has one. Whether the owner
+        # keeps it in their own sidebar, or for administrators only, does not
+        # matter here: the link publishes it.
+        energy = ha_data.panel_look(hass, "energy") if hass is not None else None
+        if self.options.get(CONF_ENERGY) and energy is not None:
+            out.append(Panel(path=sub_path(self.public_path, "energy", taken), kind="energy",
+                             dashboard="energy", title=energy.get("title"), icon=energy.get("icon")))
             taken.add(out[-1].path)
         if self.options.get(CONF_FRIGATE_UI):
             out.append(Panel(path=sub_path(self.public_path, "frigate", taken), kind="frigate", title="Frigate"))

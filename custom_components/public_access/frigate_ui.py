@@ -292,6 +292,11 @@ async def async_serve(view: Any, request: web.Request, panel: Any, extra: str) -
     if rest == "" and not request.path.endswith("/"):
         # Frigate's pages are written relative to a folder.
         raise web.HTTPFound(f"/{panel.path}/ui/")
+    if rest.strip("/") == "api/exports":
+        # Frigate's interface asks for the list of exports on its way in.
+        # A visitor has none: an empty list, so that it does not report an
+        # error, and nothing is asked of Frigate.
+        return web.json_response([], headers={"Cache-Control": "no-store"})
     path = frigate_ui_path(rest)
     if path is None:
         coordinator.note_refusal(f"Frigate interface: not passed on for a visitor: {rest[:120]}")

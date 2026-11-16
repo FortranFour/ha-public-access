@@ -69,6 +69,7 @@ class Panel:
     title: str | None = None
     views: tuple[str, ...] = ()
     support: tuple[str, ...] = ()
+    icon: str | None = None
 
 
 def sub_path(public_path: str, name: str, taken: Iterable[str]) -> str:

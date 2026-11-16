@@ -542,8 +542,23 @@ def test_every_panel_of_the_link_is_in_the_sidebar_and_nothing_else():
     assert panels["solar_energy"]["component_name"] == "energy" and panels["solar_energy"]["url_path"] == "solar_energy"
     assert panels["solar_frigate"]["component_name"] == "iframe" and panels["solar_frigate"]["config"] == {"url": "/solar_frigate/ui/"}
     assert "Private" not in json.dumps(panels) and "dashboard-guest" not in json.dumps(panels)
-    del owners["energy"]
-    assert "solar_energy" not in session._panels(owners), "no Energy dashboard, no entry"
+    assert all(p["show_in_sidebar"] and p["default_visible"] and not p["require_admin"] for p in panels.values())
+
+
+def test_a_published_panel_shows_however_the_owner_keeps_it_for_themselves():
+    """The owner may have made the Energy dashboard (or a dashboard)
+    administrators-only, so the viewer is told nothing about it, or taken it
+    out of their own sidebar. The link publishes it all the same."""
+    session, _ = _site_session()
+    hidden = {"energy": {"component_name": "energy", "title": "energy", "url_path": "energy",
+                         "require_admin": True, "show_in_sidebar": False, "default_visible": False}}
+    for told in ({}, hidden):
+        panels = session._panels(told)
+        assert list(panels) == ["solar", "solar_guests", "solar_energy", "solar_frigate"]
+        energy = panels["solar_energy"]
+        assert energy["component_name"] == "energy" and energy["title"] == "energy" and energy["icon"] == "mdi:lightning-bolt"
+        assert energy["show_in_sidebar"] is True and energy["default_visible"] is True and energy["require_admin"] is False
+        assert panels["solar_guests"]["title"] == "Guests" and panels["solar_guests"]["show_in_sidebar"] is True
 
 
 def test_each_dashboard_is_asked_for_by_its_public_address():
@@ -569,3 +584,11 @@ def test_an_edit_reaches_the_visitor_under_the_public_address_only():
     assert event("dashboard-guest")["event"]["data"]["url_path"] == "solar_guests"
     assert event("energy-public")["event"]["data"]["url_path"] == "solar"
     assert event("dashboard-private") is None
+
+
+def test_the_startup_note_is_taken_quietly():
+    session, wire = _session(_access())
+    session.handle({"id": 4, "type": "subscribe_bootstrap_integrations"})
+    assert not wire.forwarded and wire.answers == [{"id": 4, "type": "result", "success": True, "result": None}]
+    session.handle({"id": 5, "type": "unsubscribe_events", "subscription": 4})
+    assert not wire.forwarded, "and so is cancelling it"
