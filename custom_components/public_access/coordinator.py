@@ -74,6 +74,10 @@ class PublicDashboardCoordinator:
         # What visitors' pages asked for and did not get, for the owner's
         # diagnostics: the latest few, each kind of refusal once.
         self._refusals: deque[str] = deque(maxlen=40)
+        # Every kind of message the mirror turned down, with how often, and
+        # what visitors' pages reported going wrong in them.
+        self._refused_types: dict[str, int] = {}
+        self._page_errors: deque[str] = deque(maxlen=40)
 
     # -- configuration ---------------------------------------------------------
 
@@ -110,6 +114,18 @@ class PublicDashboardCoordinator:
         """Remember something a visitor's page asked for and did not get."""
         if what not in self._refusals:
             self._refusals.append(what)
+
+    def note_refused_type(self, what: str) -> None:
+        """Count a message the mirror turned down, by kind."""
+        if what in self._refused_types or len(self._refused_types) < 80:
+            self._refused_types[what] = self._refused_types.get(what, 0) + 1
+
+    def note_page_error(self, what: str) -> None:
+        """Remember an error a visitor's page reported. The text comes from a
+        visitor's browser: it is kept short, kept few, and only ever shown to
+        the owner."""
+        if what not in self._page_errors:
+            self._page_errors.append(what)
 
     def invalidate(self) -> None:
         """Called when the dashboard or the options change: what the views
@@ -255,4 +271,11 @@ class PublicDashboardCoordinator:
             "home_location_hidden": access.hide_location,
             # If a card stays empty on the public page, the reason is usually here.
             "recently_refused": list(self._refusals),
+            # Every kind of request turned down, with how often. A visitor
+            # pressing a button shows here as call_service; that is the page
+            # being read-only, not a fault.
+            "refused_requests": dict(sorted(self._refused_types.items())),
+            # What went wrong inside visitors' pages: a card that threw, a
+            # script that did not load, an error card and what it said.
+            "page_errors": list(self._page_errors),
         }

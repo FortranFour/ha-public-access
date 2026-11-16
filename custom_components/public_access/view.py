@@ -212,7 +212,7 @@ class PublicDashboardView(HomeAssistantView):
             access=await coordinator.async_access(),
             publish=coordinator.publish,
             title=coordinator.public_title,
-            note=coordinator.note_refusal,
+            notes=coordinator,
         )
 
     async def _serve_media(self, request: web.Request, route: str) -> web.StreamResponse:

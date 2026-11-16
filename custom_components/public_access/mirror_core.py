@@ -136,6 +136,34 @@ GLASS_SCRIPT = r"""
   // frontend makes a new dashboard root when the owner edits the dashboard.
   var n=0;var t=setInterval(function(){apply(true);if(++n>120){clearInterval(t);
     setInterval(function(){apply(!root||!root.isConnected||!main||!main.isConnected);},2000);}},250);
+  // What goes wrong in the page is told to the owner (it shows in the
+  // integration's diagnostics): a card that threw, a script that did not
+  // load, an error card and what it says. A dozen at most per visit.
+  var told={}, tellCount=0;
+  function tell(kind, text){
+    text=String(text||'').replace(/authSig=[\w.-]+/g,'authSig=...').slice(0,700);
+    if(!text||told[text]||tellCount>=12)return; told[text]=1; tellCount++;
+    var tries=0;(function go(){var ha=document.querySelector('home-assistant');var c=ha&&ha.hass&&ha.hass.connection;
+      if(c&&c.sendMessagePromise){c.sendMessagePromise({type:'public_access/page_error',kind:kind,text:text,view:location.pathname}).catch(function(){});}
+      else if(++tries<20)setTimeout(go,1500);})();
+  }
+  function stackOf(r){return r&&r.stack?String(r.stack).split('\n').slice(0,5).join(' | '):'';}
+  window.addEventListener('error',function(e){
+    var el=e.target;
+    if(el&&el!==window&&el.tagName){if(el.tagName==='SCRIPT'||el.tagName==='LINK')tell('not loaded',el.src||el.href);return;}
+    tell('error',(e.message||'')+' '+stackOf(e.error)+' @'+(e.filename||''));
+  },true);
+  window.addEventListener('unhandledrejection',function(e){var r=e.reason,t;
+    if(r&&r.stack)t=stackOf(r);else{try{t=JSON.stringify(r);}catch(x){t=String(r);}}
+    tell('rejection',t);});
+  function deepAll(sel){var out=[],st=[document];while(st.length){var n=st.pop();if(!n.querySelectorAll)continue;
+    var m=n.querySelectorAll(sel);for(var i=0;i<m.length;i++)out.push(m[i]);
+    var all=n.querySelectorAll('*');for(var j=0;j<all.length;j++)if(all[j].shadowRoot)st.push(all[j].shadowRoot);}return out;}
+  function errorCards(){deepAll('hui-error-card,hui-warning').slice(0,6).forEach(function(c){
+    var t=((c.shadowRoot&&c.shadowRoot.textContent)||c.textContent||'').replace(/\s+/g,' ').trim();
+    var cfg='';try{cfg=JSON.stringify(c._config||c.config||'').slice(0,200);}catch(x){}
+    tell('error card',t+' '+cfg);});}
+  var lastPath='';setInterval(function(){if(location.pathname!==lastPath){lastPath=location.pathname;setTimeout(errorCards,9000);}},1000);
   window.addEventListener('show-dialog',function(e){var d=e.detail&&e.detail.dialogTag||'';
     if(/edit|config|settings|search|quick-bar|voice|assist/i.test(d)){e.stopImmediatePropagation();}},true);
   document.addEventListener('keydown',function(e){if(e.key==='e'||e.key==='c'||e.key==='a'||e.key==='m')e.stopImmediatePropagation();},true);

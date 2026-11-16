@@ -120,6 +120,9 @@ ALLOWED_TYPES: frozenset[str] = frozenset(
         "history/stream",  # filtered
         "logbook/get_events",  # filtered, and without who did what
         "logbook/event_stream",  # filtered, and without who did what
+        "entity/source",  # filtered: which integration a published entity is from
+        "sensor/device_class_convertible_units",  # a fixed table
+        "weather/convertible_units",  # a fixed table
         "weather/subscribe_forecast",  # a published entity only
         "calendar/event/subscribe",  # a published calendar only
         # Cameras: only for a camera entity on a published view.
@@ -197,6 +200,9 @@ STATISTIC_LIST_TYPES: frozenset[str] = frozenset(
     {"recorder/list_statistic_ids", "recorder/get_statistics_metadata"}
 )
 
+# Sent by the public page itself, never by Home Assistant's frontend.
+PAGE_REPORT_TYPE = "public_access/page_error"
+
 # Answered with an empty, successful result rather than forwarded or refused.
 QUIET_TYPES: dict[str, Any] = {
     "persistent_notification/subscribe": None,
@@ -253,7 +259,7 @@ class MirrorSession:
         access: Access,
         publish: Callable[[dict[str, Any]], dict[str, Any]],
         title: str | None = None,
-        note: Callable[[str], None] | None = None,
+        notes: Any = None,
         core: Any,
     ) -> None:
         from homeassistant.components.websocket_api.connection import ActiveConnection
@@ -271,7 +277,9 @@ class MirrorSession:
         self._templates = access.strings
         self._publish = publish
         self._title = title
-        self._note = note or (lambda _what: None)
+        # Where the owner's diagnostics are kept (the coordinator).
+        self._notes = notes
+        self._note = getattr(notes, "note_refusal", None) or (lambda _what: None)
         self._types: dict[int, str] = {}
         # render_template subscriptions whose results are checked before
         # they are passed on, with their text for the owner's diagnostics.
@@ -334,6 +342,10 @@ class MirrorSession:
                 result["entities"] = [
                     e for e in result.get("entities", []) if self._entity_allowed(e.get("ei"))
                 ]
+            elif kind == "entity/source" and isinstance(result, dict):
+                message["result"] = {
+                    k: v for k, v in result.items() if self._entity_allowed(k)
+                }
             elif kind == "config/entity_registry/get_entries" and isinstance(result, dict):
                 message["result"] = {
                     k: v for k, v in result.items() if self._entity_allowed(k)
@@ -517,6 +529,9 @@ class MirrorSession:
         )
 
     def _refuse(self, msg_id: Any, kind: Any, why: str = "") -> None:
+        count = getattr(self._notes, "note_refused_type", None)
+        if count is not None:
+            count(f"{str(kind)[:80]} {why}".strip())
         self._loop.create_task(
             self._ws.send_str(
                 json.dumps(self._error(msg_id or 0, "unauthorized", "Read-only public view"))
@@ -546,6 +561,18 @@ class MirrorSession:
                     json.dumps({"id": msg_id, "type": "result", "success": True, "result": result})
                 )
             )
+            return
+
+        if kind == PAGE_REPORT_TYPE:
+            # The page telling the owner what went wrong in it (a card that
+            # threw, a script that did not load). Kept for the owner's
+            # diagnostics; it goes nowhere else and asks nothing of Home
+            # Assistant.
+            report = getattr(self._notes, "note_page_error", None)
+            if report is not None and isinstance(msg.get("text"), str):
+                report(f"{str(msg.get('view'))[:80]} [{str(msg.get('kind'))[:20]}] {msg['text'][:700]}")
+            if isinstance(msg_id, int):
+                self._reply_ok(msg_id)
             return
 
         if not isinstance(msg_id, int) or kind not in ALLOWED_TYPES:
@@ -612,6 +639,9 @@ class MirrorSession:
             if not self._entity_allowed(msg.get("entity_id")):
                 self._refuse(msg_id, kind, "(entity not on a published view)")
                 return
+        elif kind == "entity/source":
+            wanted = msg.get("entity_ids") or sorted(self._entities)
+            msg = {**msg, "entity_ids": [e for e in wanted if self._entity_allowed(e)]}
         elif kind == "config/entity_registry/get_entries":
             wanted = msg.get("entity_ids") or []
             msg = {**msg, "entity_ids": [e for e in wanted if self._entity_allowed(e)]}
@@ -709,7 +739,7 @@ async def async_serve_websocket(
     access: Access,
     publish: Callable[[dict[str, Any]], dict[str, Any]],
     title: str | None = None,
-    note: Callable[[str], None] | None = None,
+    notes: Any = None,
 ) -> web.WebSocketResponse:
     """The public websocket endpoint."""
     global _connections  # noqa: PLW0603
@@ -743,7 +773,7 @@ async def async_serve_websocket(
     session = MirrorSession(
         hass, ws, user, token, request.remote,
         public_path=public_path, dashboard=dashboard, access=access,
-        publish=publish, title=title, note=note, core=core,
+        publish=publish, title=title, notes=notes, core=core,
     )
     _connections += 1
     try:

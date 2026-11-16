@@ -116,6 +116,12 @@ def _session(access):
     session._publish = _coordinator(views=["overview"]).publish
     session._types, session._watched, session.notes = {}, {}, []
     session._note = session.notes.append
+    session.refused, session.page_errors = [], []
+    session._notes = type("Notes", (), {
+        "note_refusal": session.notes.append,
+        "note_refused_type": session.refused.append,
+        "note_page_error": session.page_errors.append,
+    })()
     session._core = mirror_core.Session(public_path="solar", dashboard="energy-public")
     session._error = lambda msg_id, code, message: {
         "id": msg_id, "type": "result", "success": False, "error": {"code": code, "message": message}}
@@ -197,6 +203,7 @@ def test_refused_before_it_reaches_home_assistant(msg):
     {"type": "frigate/recordings/summary", "instance_id": "frigate", "camera": "Front"},
     {"type": "media_source/resolve_media", "media_content_id": "media-source://frigate/frigate/event/clips/Front/1700.1-ab"},
     {"type": "map_tiles/access_token"},
+    {"type": "entity/source"},
     {"type": "uix/connect", "browserID": "x"},
     {"type": "uix/get_foundries"},
 ])
@@ -419,3 +426,33 @@ def test_the_coordinates_stay_when_the_owner_says_so():
     access.hide_location = False
     out = _answer("get_config", {"latitude": 47.6, "longitude": -122.3, "location_name": "Elm Street", "config_dir": "/config"}, access=access)
     assert out["result"] == {"latitude": 47.6, "longitude": -122.3, "location_name": "Solar", "config_dir": ""}
+
+
+# -- what the owner is told ------------------------------------------------------------
+
+
+def test_every_refused_request_is_counted_for_the_owner():
+    session, _ = _ask(type="config/zone/list")
+    assert session.refused == ["config/zone/list"]
+    session, _ = _ask(type="camera/stream", entity_id="camera.garage")
+    assert session.refused == ["camera/stream (camera not on a published view)"]
+
+
+def test_the_page_reports_its_own_errors_and_nothing_is_forwarded():
+    session, wire = _ask(type="public_access/page_error", kind="rejection", view="/solar/controls",
+                         text="TypeError: x is undefined | at card.js:1" + "y" * 2000)
+    assert not wire.forwarded and wire.answers[0]["success"] is True
+    assert len(session.page_errors) == 1
+    assert session.page_errors[0].startswith("/solar/controls [rejection] TypeError: x is undefined")
+    assert len(session.page_errors[0]) < 800, "a visitor cannot fill the owner's diagnostics"
+    session, wire = _ask(type="public_access/page_error", text={"not": "text"})
+    assert not session.page_errors and not wire.forwarded
+
+
+def test_which_integration_an_entity_is_from_is_told_for_published_entities_only():
+    _, wire = _ask(type="entity/source")
+    assert wire.forwarded[0]["entity_ids"] == ["camera.front", "light.porch", "sensor.pv"]
+    _, wire = _ask(type="entity/source", entity_ids=["sensor.pv", "lock.safe"])
+    assert wire.forwarded[0]["entity_ids"] == ["sensor.pv"]
+    out = _answer("entity/source", {"sensor.pv": {"domain": "solar"}, "lock.safe": {"domain": "zwave"}})
+    assert out["result"] == {"sensor.pv": {"domain": "solar"}}
