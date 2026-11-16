@@ -18,7 +18,7 @@
           "expires_at": "Oppure: termina il (data e ora)"
         },
         "data_description": {
-          "valid_for": "Per esempio 2 ore, oppure 7 giorni. Se impostato, sostituisce la data qui sotto.",
+          "valid_for": "Le caselle sono giorni, ore, minuti, secondi. Per esempio 7 nella prima casella per una settimana. Se impostato, sostituisce la data qui sotto e conta dal momento del salvataggio.",
           "expires_at": "Vuoto: il link non termina da solo. Da quel momento l'indirizzo risponde 'non trovato' e chi sta guardando viene disconnesso."
         }
       },
@@ -76,7 +76,7 @@
     "step": {
       "init": {
         "title": "Impostazioni del link",
-        "description": "La dashboard è pubblicata attraverso il frontend di Home Assistant, dal vivo e in sola lettura: i visitatori vedono esattamente le viste che hai scelto e non possono modificare nulla. Il cambio del percorso pubblico ha effetto dopo il riavvio di Home Assistant.",
+        "description": "La dashboard è pubblicata attraverso il frontend di Home Assistant, dal vivo e in sola lettura: i visitatori vedono esattamente le viste che hai scelto e non possono modificare nulla. Il cambio del percorso pubblico ha effetto dopo il riavvio di Home Assistant.\n\n**Limite di tempo attuale di questo link: {life}**",
         "data": {
           "enabled": "Il link è attivo",
           "dashboard": "Dashboard",
@@ -99,7 +99,8 @@
           "expires_at": "Oppure: termina il (data e ora)",
           "frigate_ui_url": "Indirizzo di Frigate per l'accesso (porta 8971)",
           "frigate_ui_user": "Utente Frigate con cui guardano i visitatori",
-          "frigate_ui_password": "Password di quell'utente"
+          "frigate_ui_password": "Password di quell'utente",
+          "no_expiry": "Rimuovi il limite di tempo"
         },
         "data_description": {
           "support_views": "Per le card che riusano qualcosa da un'altra scheda: card di riferimento, popup, una planimetria 3D i cui popup mostrano card tenute altrove. Una vista di supporto non ha una scheda, ma un visitatore che la cerca può leggerla: non deve contenere nulla di privato.",
@@ -108,12 +109,13 @@
           "frigate_cameras": "Eventi, istantanee, clip e registrazioni di queste telecamere possono essere aperti dalle card delle viste pubblicate. Le telecamere la cui entità o il cui nome compare in una vista pubblicata sono incluse senza elencarle qui; tutte le altre restano chiuse.",
           "hide_location": "Normalmente il frontend di Home Assistant riceve la posizione della casa. Attivo: i browser dei visitatori ricevono 0, 0. Una card centrata sulla casa (un radar meteo) mostra allora il posto sbagliato; disattivalo se le viste pubblicate mostrano comunque dove si trova la casa.",
           "enabled": "Disattivato: il link è revocato. L'indirizzo risponde 'non trovato' e chi sta guardando viene disconnesso subito. Esiste anche un'entità interruttore.",
-          "valid_for": "Per esempio 2 ore, oppure 7 giorni. Se impostato, sostituisce la data qui sotto.",
+          "valid_for": "Le caselle sono giorni, ore, minuti, secondi. Per esempio 7 nella prima casella per una settimana. Se impostato, sostituisce la data qui sotto e conta dal momento del salvataggio.",
           "expires_at": "Vuoto: il link non termina da solo. Da quel momento l'indirizzo risponde 'non trovato' e chi sta guardando viene disconnesso.",
           "frigate_ui": "Diretta, revisione, esplorazione e registrazioni delle telecamere Frigate selezionate sotto, e di nessun'altra. Niente impostazioni, eliminazioni, esportazioni o controllo delle telecamere.",
           "more_dashboards": "Ognuna è mostrata per intero, a meno che tu non ne scelga le viste nel passaggio successivo.",
           "frigate_ui_url": "Non l'indirizzo usato dall'integrazione Frigate: sulla porta 5000 Frigate tratta chiunque come amministratore. Di solito https, stesso host, porta 8971.",
-          "frigate_ui_user": "Crealo in Frigate (Impostazioni → Utenti) con un ruolo limitato alle telecamere da mostrare. Mai un amministratore. Ciò che quel ruolo può vedere è ciò che vedono i visitatori; se può vedere una telecamera che questo link non pubblica, il pannello Frigate non mostra nulla."
+          "frigate_ui_user": "Crealo in Frigate (Impostazioni → Utenti) con un ruolo limitato alle telecamere da mostrare. Mai un amministratore. Ciò che quel ruolo può vedere è ciò che vedono i visitatori; se può vedere una telecamera che questo link non pubblica, il pannello Frigate non mostra nulla.",
+          "no_expiry": "Il link dura allora finché non lo disattivi. Ha la precedenza sui due campi qui sopra."
         }
       },
       "more_views": {

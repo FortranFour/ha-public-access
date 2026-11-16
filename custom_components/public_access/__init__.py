@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import Event, HomeAssistant, callback
@@ -113,13 +114,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(entry.add_update_listener(_options_updated))
 
     # A link with a date: at that moment everyone using it is hung up on. The
-    # address itself answers "not found" from then on (coordinator.live).
+    # address itself answers "not found" from then on (coordinator.live), to
+    # the owner as well, so the owner is told: a notification that stays
+    # until the link gets a new date, has its limit removed, or is deleted.
+    notice = f"{DOMAIN}_expired_{entry.entry_id}"
+
+    def _tell_owner() -> None:
+        persistent_notification.async_create(
+            hass,
+            f"The public link **{entry.title}** has reached its time limit and answers"
+            " \"404: Not Found\" now. To bring it back, open its options (Settings → Devices &"
+            " services → Public Access → Configure) and give it a new time limit, or tick"
+            " \"Remove the time limit\".",
+            title="Public Access: a link has expired",
+            notification_id=notice,
+        )
+
     expires = coordinator.expires_at
+    if coordinator.expired:
+        _tell_owner()
+    else:
+        persistent_notification.async_dismiss(hass, notice)
     if expires is not None and not coordinator.expired:
 
         async def _expired(_now: Any) -> None:
-            _LOGGER.info("Public Access link /%s has expired", public_path)
+            _LOGGER.warning("Public Access link %s has reached its time limit and no longer works", entry.title)
             await coordinator.async_close_sockets()
+            _tell_owner()
             async_dispatcher_send(hass, f"{DOMAIN}_{entry.entry_id}_changed")
 
         entry.async_on_unload(async_track_point_in_utc_time(hass, _expired, expires))
@@ -151,7 +172,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """The integration was deleted: remove anything older versions left behind."""
+    """A link was deleted: take its notice away, and anything older versions left behind."""
+    persistent_notification.async_dismiss(hass, f"{DOMAIN}_expired_{entry.entry_id}")
     await _async_forget_license_files(hass)
 
 

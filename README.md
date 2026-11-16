@@ -75,7 +75,7 @@ The first link is offered the address `public`; every further one is offered twe
 | **Addresses** | The main dashboard is at the link's address. Every other panel is at that address, an underscore, and its name: `/k3x9q2m7ap4t`, `/k3x9q2m7ap4t_guest_suite`, `/k3x9q2m7ap4t_energy`. A card that navigates from one published dashboard to another keeps working: the addresses are rewritten. Because of this, no two links may have addresses where one is the other followed by an underscore. |
 | **What each link can read** | Only what its own selection uses. Two links to different views read different entities; neither can read the other's. |
 | **Revoking** | Switch *Link is active* off in the link's options, or turn off its switch entity (`switch.public_link_…`, handy on a dashboard or in an automation). The address answers "not found" at once and everyone looking is disconnected. Switching it on brings the same address back. Deleting the entry removes the link for good. |
-| **Time limit** | When the time is up the same happens by itself. The entry stays, marked expired on its switch (`expired: true`); give it a new date to bring it back. |
+| **Time limit** | When the time is up the same happens by itself, and Home Assistant shows you a notification naming the link. The entry stays, marked expired on its switch (`expired: true`) and at the top of its options. Give it a new time limit, or tick *Remove the time limit*, to bring it back. The boxes of *Valid for* are days, hours, minutes, seconds. |
 | **Sidebar** | Shown only when a link has more than one panel. It lists the link's panels and nothing else: no notifications, no profile, no settings. A view of a further dashboard that you add later is not published until you tick it. |
 
 ## Options

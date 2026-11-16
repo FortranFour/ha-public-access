@@ -18,7 +18,7 @@
           "expires_at": "Or: ends on (date and time)"
         },
         "data_description": {
-          "valid_for": "For example 2 hours, or 7 days. When set, it replaces the date below.",
+          "valid_for": "The boxes are days, hours, minutes, seconds. For example 7 in the first box for a week. When set, it replaces the date below and counts from the moment you save.",
           "expires_at": "Empty: the link does not end by itself. From that moment the address answers 'not found' and everyone looking is disconnected."
         }
       },
@@ -76,7 +76,7 @@
     "step": {
       "init": {
         "title": "Link settings",
-        "description": "Your dashboard is published through Home Assistant's own frontend, live and read-only: visitors see exactly the views you chose and cannot change anything. Changing the public path takes effect after a Home Assistant restart.",
+        "description": "Your dashboard is published through Home Assistant's own frontend, live and read-only: visitors see exactly the views you chose and cannot change anything. Changing the public path takes effect after a Home Assistant restart.\n\n**Time limit of this link now: {life}**",
         "data": {
           "enabled": "Link is active",
           "dashboard": "Dashboard",
@@ -99,7 +99,8 @@
           "expires_at": "Or: ends on (date and time)",
           "frigate_ui_url": "Frigate's address for signing in (its port 8971)",
           "frigate_ui_user": "Frigate user that visitors look as",
-          "frigate_ui_password": "That user's password"
+          "frigate_ui_password": "That user's password",
+          "no_expiry": "Remove the time limit"
         },
         "data_description": {
           "support_views": "For cards that reuse something from another tab: reference cards, popups, a 3D floor plan whose popups show cards kept elsewhere. A supporting view has no tab, but a visitor who looks for it can read it, so it must hold nothing private.",
@@ -108,12 +109,13 @@
           "frigate_cameras": "Events, snapshots, clips and recordings of these cameras can be opened by cards on the published views. Cameras whose camera entity or name is on a published view are included without being listed here; every other camera stays closed.",
           "hide_location": "Home Assistant's frontend is normally told where the home is. On: visitors' browsers get 0, 0 instead. A card that centres on the home (a weather radar) then shows the wrong place; switch this off if your published views show where the home is anyway.",
           "enabled": "Off: the link is revoked. Its address answers 'not found' and everyone looking is disconnected at once. There is also a switch entity for this.",
-          "valid_for": "For example 2 hours, or 7 days. When set, it replaces the date below.",
+          "valid_for": "The boxes are days, hours, minutes, seconds. For example 7 in the first box for a week. When set, it replaces the date below and counts from the moment you save.",
           "expires_at": "Empty: the link does not end by itself. From that moment the address answers 'not found' and everyone looking is disconnected.",
           "frigate_ui": "Live view, review, explore and recordings of the Frigate cameras ticked below, and no others. No settings, no deleting, no exports, no camera control.",
           "more_dashboards": "Each is shown whole unless you choose its views in the next step.",
           "frigate_ui_url": "Not the address the Frigate integration uses: on port 5000 Frigate treats everyone as administrator. Usually https, same host, port 8971.",
-          "frigate_ui_user": "Make it in Frigate (Settings → Users) with a role limited to the cameras to show. Never an administrator. What that role may see is what visitors see; if it can see a camera this link does not publish, the Frigate panel shows nothing."
+          "frigate_ui_user": "Make it in Frigate (Settings → Users) with a role limited to the cameras to show. Never an administrator. What that role may see is what visitors see; if it can see a camera this link does not publish, the Frigate panel shows nothing.",
+          "no_expiry": "The link then lasts until you switch it off. Overrides the two fields above."
         }
       },
       "more_views": {

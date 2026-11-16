@@ -45,6 +45,7 @@ from .const import (
     CONF_LOADING_BACKGROUND,
     CONF_MORE,
     CONF_NAME,
+    CONF_NO_EXPIRY,
     CONF_NOINDEX,
     CONF_PUBLIC_PATH,
     CONF_SHOW_TABS,
@@ -197,9 +198,10 @@ def local_expiry(stored: Any) -> str | None:
 
 
 def life_fields(current: dict[str, Any] | None = None) -> dict[Any, Any]:
-    """How long the link lasts: a span from now, or a date and time."""
+    """How long the link lasts: a span from now, or a date and time. A link
+    that has a time limit also gets a way to take it away."""
     current = current or {}
-    return {
+    fields: dict[Any, Any] = {
         vol.Optional(CONF_VALID_FOR): selector.DurationSelector(
             selector.DurationSelectorConfig(enable_day=True)
         ),
@@ -208,6 +210,20 @@ def life_fields(current: dict[str, Any] | None = None) -> dict[Any, Any]:
             description={"suggested_value": local_expiry(current.get(CONF_EXPIRES_AT))},
         ): selector.DateTimeSelector(),
     }
+    if current.get(CONF_EXPIRES_AT):
+        fields[vol.Required(CONF_NO_EXPIRY, default=False)] = bool
+    return fields
+
+
+def life_now(stored: Any) -> str:
+    """The link's time limit as it stands, for the top of the settings form."""
+    from homeassistant.util import dt as dt_util
+
+    parsed = dt_util.parse_datetime(str(stored)) if stored else None
+    if parsed is None:
+        return "—"
+    when = dt_util.as_local(parsed).strftime("%Y-%m-%d %H:%M")
+    return f"{when} — EXPIRED" if dt_util.as_utc(parsed) <= dt_util.utcnow() else when
 
 
 def more_fields(
@@ -542,6 +558,9 @@ class PublicAccessOptionsFlow(_MoreViews, OptionsFlow):
             ):
                 # An expired link's date, left as it was: still expired.
                 expires, expiry_error = str(current.get(CONF_EXPIRES_AT)), None
+            if user_input.get(CONF_NO_EXPIRY):
+                # Ticked: no time limit, whatever the two fields above say.
+                expires, expiry_error = None, None
             if expiry_error:
                 errors[CONF_EXPIRES_AT] = expiry_error
             frigate, frigate_error = await frigate_ui_answers(self.hass, user_input)
@@ -556,7 +575,7 @@ class PublicAccessOptionsFlow(_MoreViews, OptionsFlow):
             support = [v for v in _stored_views(user_input.get(CONF_SUPPORT_VIEWS)) if v not in chosen]
             if not errors:
                 self._saved = {
-                    **{k: v for k, v in user_input.items() if k != CONF_VALID_FOR},
+                    **{k: v for k, v in user_input.items() if k not in (CONF_VALID_FOR, CONF_NO_EXPIRY)},
                     CONF_LOADING_BACKGROUND: color,
                     CONF_PUBLIC_PATH: path,
                     CONF_VIEWS: chosen,
@@ -666,7 +685,12 @@ class PublicAccessOptionsFlow(_MoreViews, OptionsFlow):
                 description={"suggested_value": current.get(CONF_LOADING_BACKGROUND) or ""},
             )
         ] = str
-        return self.async_show_form(step_id="init", data_schema=vol.Schema(fields), errors=errors)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(fields),
+            errors=errors,
+            description_placeholders={"life": life_now(current.get(CONF_EXPIRES_AT))},
+        )
 
     async def _more_done(self) -> ConfigFlowResult:
         saved = self._saved

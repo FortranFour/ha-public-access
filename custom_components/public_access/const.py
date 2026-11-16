@@ -29,6 +29,7 @@ CONF_FRIGATE_UI_PASSWORD: Final = "frigate_ui_password"
 FRIGATE_UI_RATE_LIMIT_PER_MINUTE: Final = 3000
 CONF_EXPIRES_AT: Final = "expires_at"  # ISO date and time, or empty: never
 CONF_VALID_FOR: Final = "valid_for"  # asked in the form, stored as expires_at
+CONF_NO_EXPIRY: Final = "no_expiry"  # asked in the form: take the time limit away
 CONF_ENABLED: Final = "enabled"
 CONF_NOINDEX: Final = "noindex"
 CONF_CACHE_SECONDS: Final = "cache_seconds"
