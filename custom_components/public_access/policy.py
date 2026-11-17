@@ -23,7 +23,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 import json
 import re
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 # A path a visitor may name: plain characters only. No "..", no encoded
@@ -41,21 +41,270 @@ MAX_REMEMBERED_EVENTS = 20000
 # under watch. It gets this long to render...
 CHECKED_TEMPLATE_SECONDS = 5
 MAX_CHECKED_TEMPLATE_LENGTH = 32768
-# ... and may not use what reads the house without reading an entity's state,
-# which is the one thing the watch below cannot see: lists of entities and
-# devices by area, floor, label, device or integration, device and config
-# entry details, repair issues, and distances (measured from the home, they
-# would locate it).
-_UNWATCHABLE_NAMES = (
-    r"(?:integration|device|area|floor|label)_entities|(?:area|label)_devices"
-    r"|(?:floor|label)_areas|device_attr|is_device_attr|device_id|device_name"
-    r"|config_entry_id|config_entry_attr|issues?|is_hidden_entity|distance|closest"
+# ... and it is read before it is run. A template can do far more than read
+# an entity's state: list entities and devices by area or integration, read
+# device and config entry details, measure distances from the home. So an
+# assembled template may use only what is listed here, which either reads
+# nothing or reads the state of one entity it names outright, and that entity
+# has to be published. Everything else, anything Home Assistant adds later
+# included, is for templates the owner wrote in a published view.
+MAX_TEMPLATE_NODES = 20000
+# These read one entity, named by their first argument.
+_READERS = frozenset(
+    {
+        "states", "state_attr", "is_state", "is_state_attr", "has_value",
+        "state_translated", "state_attr_translated",
+    }
 )
-# The name as a function call, or as a filter after a pipe. Not as part of an
-# entity id ("sensor.unavailable_entities") or as a plain word in a string.
-_UNWATCHABLE = re.compile(
-    rf"(?<![.\w])(?:{_UNWATCHABLE_NAMES})\s*\(|\|\s*(?:{_UNWATCHABLE_NAMES})\b"
+# These read nothing: time, numbers, text.
+_PURE_FUNCTIONS = frozenset(
+    {
+        "now", "utcnow", "today_at", "as_timestamp", "as_datetime", "as_local",
+        "as_timedelta", "strptime", "timedelta", "relative_time", "time_since",
+        "time_until", "float", "int", "bool", "is_number", "iif", "max", "min",
+        "range", "namespace", "dict", "zip", "typeof", "log", "sin", "cos", "tan",
+        "asin", "acos", "atan", "atan2", "sqrt", "average", "median",
+        "statistical_mode", "clamp", "wrap", "remap", "slugify", "ordinal",
+        "bitwise_and", "bitwise_or", "bitwise_xor", "md5", "sha1", "sha256", "sha512",
+        "set", "tuple", "combine", "flatten", "intersect", "union", "difference",
+        "symmetric_difference", "urlencode",
+    }
 )
+# Plain numbers, and a loop's own counter. A template may call its own
+# variables "e" or "pi": a number is all it could reach by that name.
+_PURE_VALUES = frozenset({"loop", "pi", "e", "tau"})
+_PURE_FILTERS = frozenset(
+    {
+        # Jinja's own
+        "abs", "batch", "capitalize", "center", "count", "d", "default", "dictsort",
+        "e", "escape", "filesizeformat", "first", "float", "forceescape", "format",
+        "indent", "int", "items", "join", "last", "length", "list", "lower", "max",
+        "min", "random", "replace", "reverse", "round", "safe", "slice", "sort",
+        "string", "striptags", "sum", "title", "tojson", "trim", "truncate",
+        "unique", "upper", "urlencode", "wordcount", "wordwrap",
+        # Home Assistant's that work on the value they are given and nothing else
+        "multiply", "add", "log", "sin", "cos", "tan", "asin", "acos", "atan",
+        "atan2", "sqrt", "as_timestamp", "as_datetime", "as_timedelta", "as_local",
+        "timestamp_custom", "timestamp_local", "timestamp_utc", "to_json",
+        "from_json", "is_defined", "average", "median", "statistical_mode",
+        "regex_match", "regex_search", "regex_replace", "regex_findall",
+        "regex_findall_index", "bitwise_and", "bitwise_or", "bitwise_xor", "ord",
+        "base64_encode", "base64_decode", "slugify", "iif", "bool", "is_number",
+        "ordinal", "relative_time", "time_since", "time_until", "contains",
+        "flatten", "intersect", "difference", "union", "symmetric_difference",
+        "md5", "sha1", "sha256", "sha512", "typeof", "clamp", "wrap", "remap",
+        # these take the name of a filter or a test, which is checked as well
+        "map", "select", "reject", "selectattr", "rejectattr",
+    }
+)
+_PURE_TESTS = frozenset(
+    {
+        "defined", "undefined", "none", "number", "string", "mapping", "iterable",
+        "sequence", "boolean", "integer", "float", "true", "false", "odd", "even",
+        "divisibleby", "eq", "equalto", "==", "ne", "!=", "lt", "lessthan", "<",
+        "le", "<=", "gt", "greaterthan", ">", "ge", ">=", "in", "sameas", "lower",
+        "upper", "match", "search", "contains", "is_number", "list", "set",
+        "tuple", "datetime", "string_like",
+    }
+)
+# Where such a filter is given the name: (which names, at which argument).
+_NAMED = {
+    "map": (_PURE_FILTERS, 0),
+    "select": (_PURE_TESTS, 0),
+    "reject": (_PURE_TESTS, 0),
+    "selectattr": (_PURE_TESTS, 1),
+    "rejectattr": (_PURE_TESTS, 1),
+}
+# The parts a template may be made of: text, output, if, for, set, values,
+# arithmetic and comparisons. No macros, imports or includes.
+_TEMPLATE_PARTS = frozenset(
+    {
+        "Template", "Output", "TemplateData", "For", "If", "Assign", "AssignBlock",
+        "Name", "NSRef", "Const", "Tuple", "List", "Dict", "Pair", "Keyword",
+        "CondExpr", "Filter", "Test", "Call", "Getitem", "Getattr", "Slice",
+        "Concat", "Compare", "Operand", "Mul", "Div", "FloorDiv", "Add", "Sub",
+        "Mod", "Pow", "And", "Or", "Not", "Neg", "Pos", "Continue", "Break",
+    }
+)
+_plain_reader: Any = None
+
+
+def _read_template(text: str) -> tuple[Any, frozenset[str]]:
+    """Jinja's reading of a template, with the two extensions Home Assistant
+    switches on, and the names Jinja itself gives a meaning. Used where Home
+    Assistant's own environment is not at hand."""
+    global _plain_reader  # noqa: PLW0603
+    if _plain_reader is None:
+        from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+        _plain_reader = ImmutableSandboxedEnvironment(
+            extensions=["jinja2.ext.loopcontrols", "jinja2.ext.do"]
+        )
+    return _plain_reader.parse(text), frozenset(_plain_reader.globals)
+
+
+def _kind(node: Any) -> str:
+    return type(node).__name__
+
+
+def _known_value(node: Any, given: dict[str, Any], assigned: set[str]) -> Any:
+    """The value of an expression that is fixed before the template runs: a
+    literal, or a place in the variables sent along with it. LookupError for
+    anything worked out while it runs."""
+    kind = _kind(node)
+    if kind == "Const":
+        return node.value
+    if kind == "Name" and node.ctx == "load" and node.name in given and node.name not in assigned:
+        return given[node.name]
+    if kind == "Getattr":
+        base = _known_value(node.node, given, assigned)
+        # "config.items" is the dictionary's method, not its "items" entry.
+        if isinstance(base, dict) and node.attr in base and not hasattr(dict, node.attr):
+            return base[node.attr]
+    elif kind == "Getitem" and _kind(node.arg) == "Const":
+        base = _known_value(node.node, given, assigned)
+        key = node.arg.value
+        if isinstance(base, dict) and isinstance(key, str) and key in base:
+            return base[key]
+        if isinstance(base, list) and isinstance(key, int) and not isinstance(key, bool) and 0 <= key < len(base):
+            return base[key]
+    raise LookupError
+
+
+def _state_object_entity(node: Any, parents: dict[int, Any]) -> str | None:
+    """The entity ``states.sensor.pv`` or ``states['sensor.pv']`` stands for,
+    given the ``states`` in it; None if ``states`` is used any other way
+    (``states.sensor`` is every sensor, ``states`` alone every entity)."""
+    parent = parents.get(id(node))
+    if _kind(parent) == "Getitem" and parent.node is node:
+        key = parent.arg.value if _kind(parent.arg) == "Const" else None
+        return key if isinstance(key, str) and "." in key else None
+    if _kind(parent) == "Getattr" and parent.node is node:
+        above = parents.get(id(parent))
+        if _kind(above) == "Getattr" and above.node is parent:
+            return f"{parent.attr}.{above.attr}"
+    return None
+
+
+def assembled_template_problem(
+    template: str,
+    entities: Iterable[str],
+    variables: Any = None,
+    read: Callable[[str], tuple[Any, Iterable[str]]] | None = None,
+) -> str | None:
+    """Why a template some card assembled may not be rendered for a visitor,
+    or None if it may.
+
+    It may if it is made of plain parts only (``_TEMPLATE_PARTS``), calls only
+    functions, filters and tests that read nothing, and reads entities only
+    through ``states('entity.id')`` and its like (or ``states.sensor.pv``)
+    with the entity named outright, as text or as a variable sent along, and
+    published. Such a
+    template cannot read what is not published, however it is put together,
+    so nothing is learnt from running it, from how long it takes or from how
+    it fails.
+
+    ``read`` turns the text into Jinja's tree and says which names the
+    environment gives a meaning (Home Assistant's own does, in data.py, so
+    that what is checked here is what will run there).
+    """
+    entities = entities if isinstance(entities, (set, frozenset)) else set(entities)
+    given = variables if isinstance(variables, dict) else {}
+    try:
+        tree, meant = (read or _read_template)(template.strip())
+        reserved = set(meant) | _READERS | _PURE_FUNCTIONS | _PURE_VALUES
+    except Exception:  # noqa: BLE001 - not a template, or no parser to read it with
+        return "it cannot be read as a template"
+    nodes = []
+    parents: dict[int, Any] = {}
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        nodes.append(node)
+        if len(nodes) > MAX_TEMPLATE_NODES:
+            return "it is too large"
+        for child in node.iter_child_nodes():
+            parents[id(child)] = node
+            stack.append(child)
+    assigned = {
+        node.name for node in nodes if _kind(node) == "Name" and node.ctx in ("store", "param")
+    }
+    # A name set inside a loop means the template's own value there and Home
+    # Assistant's function everywhere else. No name gets two meanings.
+    twice = sorted((assigned & reserved) - _PURE_VALUES)
+    if twice:
+        return f"it gives {twice[0]} another meaning"
+    for node in nodes:
+        if _kind(node) not in _TEMPLATE_PARTS:
+            return f"it uses a part ({_kind(node).lower()}) only a template written in a published view may"
+    called: dict[int, Any] = {}
+    for node in nodes:
+        kind = _kind(node)
+        if kind in ("Call", "Filter", "Test") and (
+            node.dyn_args is not None or node.dyn_kwargs is not None
+        ):
+            return "it passes arguments it works out as it runs"
+        if kind == "Call":
+            target = _kind(node.node)
+            if target == "Name":
+                if node.node.name in assigned:
+                    return "it calls what it works out as it runs"
+                called[id(node.node)] = node
+            elif target != "Getattr":
+                return "it calls what it works out as it runs"
+        elif kind == "Filter":
+            if node.name not in _PURE_FILTERS:
+                return f"it uses the filter {node.name}"
+            if node.name in _NAMED:
+                names, at = _NAMED[node.name]
+                if len(node.args) > at:
+                    named = node.args[at]
+                    if _kind(named) != "Const" or named.value not in names:
+                        return f"it uses {node.name} with something other than a plain filter or test"
+        elif kind == "Test":
+            if node.name not in _PURE_TESTS:
+                return f"it uses the test {node.name}"
+        elif kind == "Getattr":
+            if node.attr.startswith("_"):
+                return "it reaches into an object"
+        elif kind == "Getitem":
+            if _kind(node.arg) == "Const" and isinstance(node.arg.value, str) and node.arg.value.startswith("_"):
+                return "it reaches into an object"
+        elif kind == "NSRef":
+            if node.name not in assigned or node.attr.startswith("_"):
+                return f"it uses {node.name}"
+        elif kind == "Name" and node.ctx == "load":
+            name = node.name
+            if name in assigned:
+                continue  # the template's own value
+            if name in given:
+                continue  # a value sent along: data, whatever it is called
+            call = called.get(id(node))
+            if name == "states" and call is None:
+                # The other way to one entity: states.sensor.pv, states['sensor.pv'].
+                entity = _state_object_entity(node, parents)
+                if entity is None:
+                    return "it uses states other than for one entity it names"
+                if entity not in entities:
+                    return f"it reads {entity[:100]}, not on a published view"
+            elif name in _READERS:
+                if call is None:
+                    return f"it uses {name} other than by calling it"
+                if not call.args:
+                    return f"it calls {name} without naming an entity"
+                try:
+                    entity = _known_value(call.args[0], given, assigned)
+                except LookupError:
+                    return f"it works out as it runs which entity {name} reads"
+                if not isinstance(entity, str) or entity not in entities:
+                    return f"it reads {str(entity)[:100]}, not on a published view"
+            elif name in _PURE_FUNCTIONS:
+                if call is None:
+                    return f"it uses {name} other than by calling it"
+            elif name not in _PURE_VALUES:
+                return f"it uses {name}"
+    return None
+
 
 # Conditions. Home Assistant decides for the page whether a conditional card
 # or a card with a ``visibility`` shows: the page sends the condition and is
@@ -287,37 +536,52 @@ class Access:
     hide_location: bool = True
     # Conditions written in the published views (sanitize.collect_conditions).
     conditions: set[str] = field(default_factory=set)
+    # Does the link show the energy settings: the Energy dashboard, or an
+    # energy card on a published view? If not they are not a visitor's.
+    energy: bool = False
 
     def entity_allowed(self, entity_id: Any) -> bool:
         return isinstance(entity_id, str) and entity_id in self.entities
 
     # -- templates ------------------------------------------------------------
 
-    def template_trust(self, template: Any) -> str | None:
-        """How a template a visitor's page asks to render is treated.
+    def template_verdict(
+        self,
+        template: Any,
+        variables: Any = None,
+        read: Callable[[str], tuple[Any, Iterable[str]]] | None = None,
+    ) -> tuple[str | None, str]:
+        """How a template a visitor's page asks to render is treated, and why
+        if it is not rendered.
 
         ``"written"``: its text is in a published view word for word (or in a
         UIX foundry such a view uses, or it is what UIX composes from such
         text), so the owner wrote it for this page; it is rendered as it is.
 
-        ``"checked"``: some card put it together in the browser. It may be
-        rendered, but only under watch: Home Assistant reports which entities
-        a template read, and the result is passed on only if every one of them
-        is published (``template_reads_allowed``).
+        ``"checked"``: some card put it together in the browser. It is read
+        first (``assembled_template_problem``) and rendered only if it can
+        read nothing but published entities. Rendered, it is watched as well:
+        Home Assistant reports which entities a template read, and the result
+        is passed on only if every one of them is published
+        (``template_reads_allowed``).
 
         ``None``: not rendered at all.
         """
         if not isinstance(template, str):
-            return None
+            return None, "it is not text"
         if template in self.strings:
-            return "written"
+            return "written", ""
         if len(template) > MAX_CHECKED_TEMPLATE_LENGTH:
-            return None
+            return None, "it is not written in a published view and is very long"
         if composed_of_written(template, self.strings):
-            return "written"
-        if _UNWATCHABLE.search(template):
-            return None
-        return "checked"
+            return "written", ""
+        problem = assembled_template_problem(template, self.entities, variables, read)
+        if problem:
+            return None, "it is not written in a published view, and " + problem
+        return "checked", ""
+
+    def template_trust(self, template: Any, variables: Any = None) -> str | None:
+        return self.template_verdict(template, variables)[0]
 
     def template_reads_allowed(self, listeners: Any) -> bool:
         """Did a watched template read published entities and nothing else?

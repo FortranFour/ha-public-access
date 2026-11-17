@@ -136,7 +136,7 @@ def test_templates_are_rendered_only_written_or_watched():
     a published view, or with its results checked against what it read."""
     mirror = (PACKAGE / "mirror.py").read_text(encoding="utf-8")
     branch = mirror[mirror.index('elif kind == "render_template":'):mirror.index("self._types[msg_id] = kind")]
-    assert "self._access.template_trust(" in branch and "self._watched[msg_id]" in branch
+    assert "self._access.template_verdict(" in branch and "self._watched[msg_id]" in branch
     assert "if msg_id in self._watched and message.get(\"type\") == \"event\":" in mirror
 
 
@@ -179,3 +179,17 @@ def test_frigates_answers_are_passed_on_as_they_come():
     assert text.count("headers=_PLAIN") == 2, "signing in and the account check"
     serve = text[text.index("async def async_serve"):text.index("def _cleaner")]
     assert '"identity" if cleaner is not None else request.headers.get("Accept-Encoding", "identity")' in serve
+
+
+def test_an_id_is_checked_before_anything_is_noted_about_its_message():
+    """The kind of a request decides how its answers are filtered. A second
+    message under a used id must be turned down before it can change that."""
+    mirror = (PACKAGE / "mirror.py").read_text(encoding="utf-8")
+    handle = mirror[mirror.index("    def handle(self, msg"):mirror.index("    def close(self)")]
+    check = handle.index("if msg_id <= self._last_id:")
+    for noted in ("self._types[msg_id] = kind", "self._watched[msg_id] =", "self._asked[msg_id] =",
+                  "self._conditions.add(msg_id)", "silent_subscription(msg_id)"):
+        assert check < handle.index(noted), noted
+    assert handle.count("self._types[msg_id] = kind") == 1
+    outbound = mirror[mirror.index("    def _filter_outbound"):mirror.index("    def _watched_template_event")]
+    assert outbound.index("if kind is None:") < outbound.index('message.get("success") is False')

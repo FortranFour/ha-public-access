@@ -38,5 +38,6 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - run: pip install pytest
+      # Jinja for the checks of templates a card assembles (policy.py reads them with it).
+      - run: pip install pytest jinja2
       - run: python -m pytest tests -q

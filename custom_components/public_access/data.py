@@ -361,6 +361,28 @@ async def async_open_own_socket(hass: HomeAssistant, signed_path: str) -> Any | 
     return None
 
 
+def template_reader(hass: HomeAssistant) -> Any:
+    """How policy.assembled_template_problem reads a template: with the same
+    Jinja environment Home Assistant will render it with, so that what is
+    checked is what runs, and with the names that environment gives a meaning.
+    None when that environment cannot be reached; the policy then reads with
+    plain Jinja."""
+    try:
+        from homeassistant.helpers.template import Template
+
+        env = Template("", hass)._env  # noqa: SLF001
+        if env is None or not callable(getattr(env, "parse", None)):
+            return None
+    except Exception:  # noqa: BLE001 - a Home Assistant that keeps it elsewhere
+        _LOGGER.debug("Home Assistant's template environment is not where it was", exc_info=True)
+        return None
+
+    def read(text: str) -> tuple[Any, frozenset[str]]:
+        return env.parse(text), frozenset(env.globals)
+
+    return read
+
+
 async def async_uix_foundries(hass: HomeAssistant) -> dict[str, Any] | None:
     """UIX's foundries (shared card definitions), as UIX hands them to its
     frontend; None when UIX is not installed.

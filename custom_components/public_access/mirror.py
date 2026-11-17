@@ -83,7 +83,7 @@ ALLOWED_TYPES: frozenset[str] = frozenset(
         "frontend/get_translations",
         "frontend/get_user_data",
         "frontend/subscribe_user_data",  # the viewer's own (empty) preferences
-        "frontend/subscribe_system_data",  # frontend feature flags, nothing private
+        "frontend/subscribe_system_data",  # a few keys only (SYSTEM_DATA_KEYS)
         "frontend/get_system_data",  # the same, asked once (the Energy dashboard does)
         "frontend/get_icons",
         "brands/access_token",  # lets the frontend fetch integration logos
@@ -105,10 +105,11 @@ ALLOWED_TYPES: frozenset[str] = frozenset(
         "lovelace/resources",  # custom cards need their JavaScript
         # render_template as it is for a template string that appears verbatim
         # in a published view (the markdown card renders its content through
-        # it). A template some card assembled in the browser is rendered under
-        # watch: its result is passed on only if it read published entities
-        # and nothing else (policy.Access.template_trust). Anything else
-        # could read every state and is refused.
+        # it). A template some card assembled in the browser is read first and
+        # rendered only if it can read nothing but published entities
+        # (policy.assembled_template_problem), and then under watch: its
+        # result is passed on only if it read published entities and nothing
+        # else. Anything else could read every state and is refused.
         "render_template",
         # Whether a conditional card, or a card with a "visibility", shows:
         # since Home Assistant 2026.11 the frontend asks the server instead of
@@ -123,6 +124,7 @@ ALLOWED_TYPES: frozenset[str] = frozenset(
         # something (uix/set_foundry and the like) stay refused.
         "uix/connect",
         "uix/get_foundries",
+        # The energy settings: only on a link that shows energy.
         "energy/get_prefs",
         "energy/info",
         "energy/validate",
@@ -222,6 +224,36 @@ STATISTIC_LIST_TYPES: frozenset[str] = frozenset(
     {"recorder/list_statistic_ids", "recorder/get_statistics_metadata"}
 )
 
+# The requests Home Assistant answers more than once: after the result come
+# events. Only for these is an event passed on at all, and each through the
+# filter of the request it belongs to.
+EVENT_SOURCES: frozenset[str] = frozenset(
+    {
+        "subscribe_entities",
+        "subscribe_events",
+        "render_template",
+        "subscribe_condition",
+        "frontend/subscribe_user_data",
+        "frontend/subscribe_system_data",
+        "labs/subscribe",
+        "uix/connect",
+        "history/stream",
+        "logbook/event_stream",
+        "weather/subscribe_forecast",
+        "calendar/event/subscribe",
+        "camera/webrtc/offer",
+        "frigate/events/subscribe",
+        "frigate/reviews/subscribe",
+    }
+)
+# Frontend system data a visitor's page may have: the frontend's own settings,
+# and the Energy dashboard's when the link shows energy. Other keys hold the
+# owner's choices for pages a visitor does not have.
+SYSTEM_DATA_KEYS: frozenset[str] = frozenset({"core", "energy"})
+# What a visitor is told when an assembled template is not answered, whatever
+# the reason: it failed, it took too long, it read what is not published.
+TEMPLATE_NOT_RENDERED = "Read-only public view: this template is not rendered"
+
 # Sent by the public page itself, never by Home Assistant's frontend.
 PAGE_REPORT_TYPE = "public_access/page_error"
 
@@ -287,6 +319,7 @@ class MirrorSession:
         notes: Any = None,
         core: Any,
         panels: list[Panel] | None = None,
+        access_now: Callable[[], Access] | None = None,
     ) -> None:
         from homeassistant.components.websocket_api.connection import ActiveConnection
         from homeassistant.components.websocket_api.messages import (
@@ -297,10 +330,10 @@ class MirrorSession:
         self._ws = ws
         self._public_path = public_path
         self._dashboard = dashboard
-        self._access = access
-        self._entities = access.entities
-        self._statistics = access.statistics
-        self._templates = access.strings
+        # What may be read is asked for each time, not kept from the moment
+        # the visitor connected: a dashboard the owner has edited since counts
+        # as it is now.
+        self._access_now = access_now or (lambda: access)
         self._publish = publish
         self._title = title
         # Everything the link shows, the main dashboard first.
@@ -310,7 +343,13 @@ class MirrorSession:
         # Where the owner's diagnostics are kept (the coordinator).
         self._notes = notes
         self._note = getattr(notes, "note_refusal", None) or (lambda _what: None)
+        # The kind of every request passed on to Home Assistant, by its id.
+        # An answer goes through the filter of the request it answers; an id
+        # is used once (see handle), so that never changes afterwards.
         self._types: dict[int, str] = {}
+        self._last_id = 0
+        # Requests passed on and not answered yet.
+        self._awaiting: set[int] = set()
         # render_template subscriptions whose results are checked before
         # they are passed on, with their text for the owner's diagnostics.
         self._watched: dict[int, str] = {}
@@ -318,11 +357,26 @@ class MirrorSession:
         self._conditions: set[int] = set()
         # The frontend glue, called only after this class's own filters.
         self._core = core.Session(public_path=public_path, dashboard=dashboard)
+        from .data import template_reader
+
+        self._read_template = template_reader(hass)
         self._loop = hass.loop
         self._error = error_message
         self._connection = ActiveConnection(
             _LOGGER, hass, self._send, user, token, remote
         )
+
+    @property
+    def _access(self) -> Access:
+        return self._access_now()
+
+    @property
+    def _entities(self) -> set[str]:
+        return self._access.entities
+
+    @property
+    def _statistics(self) -> set[str]:
+        return self._access.statistics
 
     # -- outbound (Home Assistant -> visitor) ---------------------------------
 
@@ -330,11 +384,11 @@ class MirrorSession:
         if isinstance(message, (bytes, str)):
             raw = message.decode() if isinstance(message, bytes) else message
             try:
-                decoded = json.loads(raw)
+                message = json.loads(raw)
             except ValueError:
-                self._loop.create_task(self._ws.send_str(raw))
-                return
-            message = decoded
+                return  # nothing Home Assistant sends; nothing to check it by
+        if not isinstance(message, dict):
+            return
         message = self._filter_outbound(message)
         if message is not None:
             # Filters first, glue second: the glue only adapts what may be seen.
@@ -343,11 +397,30 @@ class MirrorSession:
 
     def _filter_outbound(self, message: dict[str, Any]) -> dict[str, Any] | None:
         msg_id = message.get("id")
-        kind = self._types.get(msg_id, "")
+        kind = self._types.get(msg_id) if isinstance(msg_id, int) else None
+        if kind is None:
+            # Not the answer to anything passed on from here, so there is no
+            # telling what it holds or which filter it needs: it stays here.
+            _LOGGER.debug("Mirror: dropped a message for no known request (%s)", message.get("type"))
+            return None
+        if message.get("type") == "result":
+            self._awaiting.discard(msg_id)
+        elif message.get("type") == "pong" and kind == "ping":
+            self._awaiting.discard(msg_id)
+            return message
+        elif message.get("type") != "event" or kind not in EVENT_SOURCES:
+            # An event under the id of a request that has no events.
+            _LOGGER.debug("Mirror: dropped a %s for %s", message.get("type"), kind)
+            return None
         if message.get("type") == "result" and message.get("success") is False:
             # Diagnostics: an error Home Assistant itself returned to a forwarded
             # message. These surface in the page as unhandled rejections.
             _LOGGER.debug("Mirror: HA answered %s with %s", kind, message.get("error"))
+            self._conditions.discard(msg_id)
+            if self._watched.pop(msg_id, None) is not None:
+                # An error can quote what the template read on its way to
+                # failing, so an assembled template's is not passed on.
+                return self._error(msg_id, "template_error", TEMPLATE_NOT_RENDERED)
             return message
         if msg_id in self._watched and message.get("type") == "event":
             return self._watched_template_event(msg_id, message)
@@ -455,7 +528,13 @@ class MirrorSession:
         page is told the template failed."""
         event = message.get("event")
         if not isinstance(event, dict) or "result" not in event:
-            return message  # a template error, reported as Home Assistant words it
+            # An error or a warning from rendering it. Such a text can quote
+            # what the template read, so the visitor gets a fixed one.
+            return {
+                "id": msg_id,
+                "type": "event",
+                "event": {"error": TEMPLATE_NOT_RENDERED, "level": "ERROR"},
+            }
         listeners = event.get("listeners")
         if self._access.template_reads_allowed(listeners):
             # Home Assistant hands these over as sets; a list is what the page
@@ -483,7 +562,7 @@ class MirrorSession:
         return {
             "id": msg_id,
             "type": "event",
-            "event": {"error": "Read-only public view: this template reads what is not published", "level": "ERROR"},
+            "event": {"error": TEMPLATE_NOT_RENDERED, "level": "ERROR"},
         }
 
     def _unpublished_entities_in(self, variables: Any) -> list[str]:
@@ -507,6 +586,19 @@ class MirrorSession:
             elif isinstance(value, list):
                 stack.extend(value)
         return sorted(found)
+
+    def _forget_if_ended(self, subscription: Any) -> None:
+        """After a visitor cancelled a subscription: stop keeping its watch,
+        but only once Home Assistant really has none under that id. Cancelled
+        before it has started, it starts afterwards all the same, and its
+        results must still be checked."""
+        if (
+            isinstance(subscription, int)
+            and subscription not in self._awaiting
+            and subscription not in self._connection.subscriptions
+        ):
+            self._watched.pop(subscription, None)
+            self._conditions.discard(subscription)
 
     def _end_subscription(self, msg_id: int) -> None:
         """Stop a forwarded subscription from this side."""
@@ -610,6 +702,22 @@ class MirrorSession:
     def handle(self, msg: dict[str, Any]) -> None:
         kind = msg.get("type")
         msg_id = msg.get("id")
+        if isinstance(msg_id, bool):
+            msg_id = None
+        if isinstance(msg_id, int):
+            # Before anything is noted down about the message: an id is used
+            # once and ids only go up, as Home Assistant itself demands. A
+            # second message under an id already used would otherwise put its
+            # own kind in place of the first one's, and the first one's
+            # answers and events would go through the wrong filter, or none.
+            if msg_id <= self._last_id:
+                self._loop.create_task(
+                    self._ws.send_str(
+                        json.dumps(self._error(msg_id, "id_reuse", "Identifier values have to increase."))
+                    )
+                )
+                return
+            self._last_id = msg_id
 
         # Requests that must not be forwarded but where "nothing" is the honest
         # answer for a viewer: no notifications, no repair issues, and the
@@ -651,9 +759,6 @@ class MirrorSession:
             )
             return
 
-        if kind == "unsubscribe_events":
-            self._watched.pop(msg.get("subscription"), None)
-            self._conditions.discard(msg.get("subscription"))
         answered, result = self._core.local_answer(kind, msg)
         if answered:
             self._reply_ok(msg_id, result)
@@ -703,6 +808,10 @@ class MirrorSession:
         elif kind == "recorder/statistics_during_period" and self._statistics is not None:
             wanted = msg.get("statistic_ids") or []
             msg = {**msg, "statistic_ids": [s for s in wanted if s in self._statistics]}
+            if not msg["statistic_ids"]:
+                # Nothing published was asked for: nothing is the answer.
+                self._reply_ok(msg_id, {})
+                return
         elif kind == "recorder/statistic_during_period":
             if msg.get("statistic_id") not in self._statistics:
                 self._refuse(msg_id, kind, "(statistic not on a published view)")
@@ -782,12 +891,41 @@ class MirrorSession:
                 self._refuse(msg_id, kind, "(Frigate camera not published)")
                 return
             msg = checked
-        elif kind == "frontend/get_system_data":
-            # The frontend's own settings and the Energy dashboard's; other
-            # keys hold the owner's choices for pages a visitor does not have.
-            if msg.get("key") not in ("core", "energy"):
-                self._refuse(msg_id, kind, "(not a visitor's)")
+        elif kind in ("frontend/get_system_data", "frontend/subscribe_system_data"):
+            # Read once or subscribed to, the same keys and no others.
+            key = msg.get("key")
+            if key not in SYSTEM_DATA_KEYS or (key == "energy" and not self._access.energy):
+                if kind == "frontend/get_system_data":
+                    self._refuse(msg_id, kind, "(not a visitor's)")
+                else:
+                    # As Home Assistant answers for a key nobody has set, and
+                    # then nothing more.
+                    count = getattr(self._notes, "note_refused_type", None)
+                    if count is not None:
+                        count(f"{kind} (not a visitor's)")
+                    self._core.silent_subscription(msg_id)
+                    self._loop.create_task(
+                        self._ws.send_str(json.dumps({"id": msg_id, "type": "event", "event": {"value": None}}))
+                    )
+                    self._reply_ok(msg_id)
                 return
+        elif kind.startswith("energy/"):
+            # The energy settings name the house's meters, tariffs and solar
+            # arrays. They are a visitor's only if the link shows energy.
+            if not self._access.energy:
+                if kind == "energy/get_prefs":
+                    # Home Assistant's own answer where none are set.
+                    self._loop.create_task(
+                        self._ws.send_str(json.dumps(self._error(msg_id, "not_found", "No prefs")))
+                    )
+                else:
+                    self._refuse(msg_id, kind, "(energy is not published)")
+                return
+            if kind == "energy/fossil_energy_consumption":
+                asked = [msg.get("co2_statistic_id"), *(msg.get("energy_statistic_ids") or [])]
+                if not all(isinstance(s, str) and s in self._statistics for s in asked):
+                    self._refuse(msg_id, kind, "(statistic not published)")
+                    return
         elif kind == "lovelace/config":
             # Asked for by public address. Any other name, "lovelace" and no
             # name at all get the link's main dashboard: whatever is asked,
@@ -833,29 +971,35 @@ class MirrorSession:
                 )
                 self._refuse(msg_id, kind, "(variables name unpublished entities)")
                 return
-            trust = self._access.template_trust(msg.get("template"))
+            trust, why = self._access.template_verdict(
+                msg.get("template"), msg.get("variables"), getattr(self, "_read_template", None)
+            )
             if trust is None:
                 self._note(
-                    "Template not rendered for a visitor: it is not written in a published view"
-                    " and uses a function that lists or locates what is not published."
+                    f"Template not rendered for a visitor: {why}."
                     f" Template: {str(msg.get('template'))[:300]}"
                 )
                 self._refuse(msg_id, kind, "(not from a published view)")
                 return
             if trust == "checked":
-                # Rendered under watch (see _watched_template_event), and
-                # with a limit on how long it may take.
+                # Read before it runs (policy.assembled_template_problem),
+                # rendered under watch (see _watched_template_event), with a
+                # limit on how long it may take, and without Home Assistant's
+                # own error texts, which can quote what a template read.
                 given = msg.get("timeout")
                 limit = (
                     min(given, CHECKED_TEMPLATE_SECONDS)
-                    if isinstance(given, (int, float)) and given > 0
+                    if isinstance(given, (int, float)) and not isinstance(given, bool) and given > 0
                     else CHECKED_TEMPLATE_SECONDS
                 )
-                msg = {**msg, "timeout": limit}
-                self._watched[msg_id] = msg["template"]
+                msg = {**msg, "timeout": limit, "report_errors": False, "strict": False}
+                self._watched[msg_id] = msg["template"][:300]
 
         self._types[msg_id] = kind
+        self._awaiting.add(msg_id)
         self._connection.async_handle(self._core.inbound(kind, msg))
+        if kind == "unsubscribe_events":
+            self._forget_if_ended(msg.get("subscription"))
 
     def close(self) -> None:
         self._connection.async_handle_close()
@@ -872,6 +1016,7 @@ async def async_serve_websocket(
     title: str | None = None,
     notes: Any = None,
     panels: list[Panel] | None = None,
+    access_now: Callable[[], Access] | None = None,
 ) -> web.WebSocketResponse:
     """The public websocket endpoint."""
     global _connections  # noqa: PLW0603
@@ -906,6 +1051,7 @@ async def async_serve_websocket(
         hass, ws, user, token, request.remote,
         public_path=public_path, dashboard=dashboard, access=access,
         publish=publish, title=title, notes=notes, core=core, panels=panels,
+        access_now=access_now,
     )
     _connections += 1
     # The link's own list of open sockets: revoking it hangs up on them.

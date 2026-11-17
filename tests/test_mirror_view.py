@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("homeassistant")
 
-from custom_components.public_access import mirror_core  # noqa: E402
+from custom_components.public_access import mirror, mirror_core  # noqa: E402
 from custom_components.public_access.coordinator import PublicDashboardCoordinator  # noqa: E402
 from custom_components.public_access.mirror import MirrorSession  # noqa: E402
 from custom_components.public_access.policy import Access, FrigateAccess  # noqa: E402
@@ -111,8 +111,8 @@ def _session(access):
     session._hass = type("Hass", (), {"states": type("States", (), {"get": staticmethod(
         lambda entity_id: object() if entity_id in EXISTING else None)})})()
     session._public_path, session._dashboard, session._title = "solar", "energy-public", "Solar"
-    session._access = access
-    session._entities, session._statistics, session._templates = access.entities, access.statistics, access.strings
+    session._access_now = lambda: access
+    session._last_id, session._awaiting, session._read_template = 0, set(), None
     session._publish = _coordinator(views=["overview"]).publish
     session._types, session._watched, session.notes = {}, {}, []
     session._conditions = set()
@@ -327,7 +327,7 @@ def test_the_logbook_does_not_say_who_did_it():
 
 # -- templates a card put together in the browser ----------------------------------------
 
-COMPOSED = "{% macro onoff(e) %}{{ is_state(e, 'on') }}{% endmacro %}\n{{ onoff('light.porch') }}"
+COMPOSED = "{% set on = is_state('light.porch', 'on') %}{{ 'lit' if on else 'dark' }}"
 
 
 def _watched(template=COMPOSED, **extra):
@@ -384,10 +384,198 @@ def test_a_result_that_does_not_say_what_it_read_is_withheld():
     assert "result" not in out["event"] and wire.ended == [7]
 
 
-def test_a_template_error_is_passed_on_as_home_assistant_words_it():
+def test_an_assembled_template_is_rendered_without_home_assistants_error_texts():
+    """An error can quote what the template read ("float got invalid input
+    'armed_away'"), so none is asked for and none is passed on."""
+    session, wire = _watched(report_errors=True, strict=True)
+    assert wire.forwarded[0]["report_errors"] is False and wire.forwarded[0]["strict"] is False
+    out = session._filter_outbound({"id": 7, "type": "event", "event": {
+        "error": "ValueError: float got invalid input 'armed_away'", "level": "ERROR"}})
+    assert out["event"] == {"error": mirror.TEMPLATE_NOT_RENDERED, "level": "ERROR"}
+    failed = session._filter_outbound({"id": 7, "type": "result", "success": False,
+                                       "error": {"code": "template_error", "message": "got 'armed_away'"}})
+    assert failed["error"]["message"] == mirror.TEMPLATE_NOT_RENDERED and 7 not in session._watched
+
+
+def test_withheld_and_failed_look_the_same_to_the_visitor():
     session, _ = _watched()
+    withheld = _result(session, entities={"lock.safe"})
+    session, _ = _watched()
+    failed = session._filter_outbound({"id": 7, "type": "event", "event": {"error": "x", "level": "ERROR"}})
+    assert withheld == failed
+
+
+@pytest.mark.parametrize("template", [
+    "{{ states('lock.safe') }}",
+    "{{ states('lock.' ~ 'safe') }}",
+    "{% set f = integration_entities %}{{ f('hue') }}",
+    "{{ entity_name('lock.safe') }}",
+    "{{ areas() }}",
+])
+def test_an_assembled_template_that_could_read_more_is_not_run_at_all(template):
+    session, wire = _ask(type="render_template", template=template)
+    assert _refused(wire) and not session._watched
+    assert "Template not rendered for a visitor: it is not written in a published view" in session.notes[0]
+
+
+def test_a_written_templates_error_is_passed_on_as_home_assistant_words_it():
+    session, _ = _ask(type="render_template", template="{{ states('sensor.pv') }}")
     error = {"id": 7, "type": "event", "event": {"error": "UndefinedError: x", "level": "ERROR"}}
     assert session._filter_outbound(dict(error)) == error
+
+
+def test_cancelling_a_watched_template_before_it_started_does_not_lift_the_watch():
+    """Home Assistant starts the subscription only after a first trial
+    render. Cancelled in between, it answers "not found" and starts it
+    afterwards all the same; its results must still be checked then."""
+    session, wire = _session(_access())
+    session.handle({"id": 1, "type": "render_template", "template": COMPOSED})
+    session.handle({"id": 2, "type": "unsubscribe_events", "subscription": 1})
+    assert 1 in session._watched, "no answer yet: the subscription may still start"
+    wire.subscriptions[1] = lambda: wire.ended.append(1)
+    session._filter_outbound({"id": 1, "type": "result", "success": True, "result": None})
+    out = session._filter_outbound({"id": 1, "type": "event", "event": {
+        "result": "secret", "listeners": {"all": False, "entities": {"lock.safe"}, "domains": set(), "time": False}}})
+    assert "result" not in out["event"] and wire.ended == [1]
+
+
+def test_a_watch_is_let_go_once_the_subscription_is_really_gone():
+    session, wire = _session(_access())
+    session.handle({"id": 1, "type": "render_template", "template": COMPOSED})
+    wire.subscriptions[1] = lambda: None
+    session._filter_outbound({"id": 1, "type": "result", "success": True, "result": None})
+    del wire.subscriptions[1]  # Home Assistant ends it on the visitor's word
+    session.handle({"id": 2, "type": "unsubscribe_events", "subscription": 1})
+    assert not session._watched
+
+
+# -- every answer goes through the filter of its own request ---------------------------
+
+
+def test_an_id_already_used_is_turned_down_and_changes_nothing():
+    """Sent again under the id of a running subscription, a harmless request
+    would otherwise put its own kind in place of the subscription's, and the
+    subscription's events would then go out unfiltered."""
+    session, wire = _session(_access())
+    session.handle({"id": 5, "type": "subscribe_events", "event_type": "state_changed"})
+    session.handle({"id": 5, "type": "ping"})
+    session.handle({"id": 4, "type": "get_states"})
+    session.handle({"id": 5, "type": "persistent_notification/subscribe"})
+    assert [m["type"] for m in wire.forwarded] == ["subscribe_events"]
+    assert [a["error"]["code"] for a in wire.answers] == ["id_reuse"] * 3
+    assert session._types == {5: "subscribe_events"}
+    secret = {"id": 5, "type": "event", "event": {"event_type": "state_changed", "data": {
+        "entity_id": "lock.safe", "new_state": {"state": "unlocked"}}}}
+    assert session._filter_outbound(secret) is None
+    session.handle({"id": 6, "type": "ping"})
+    assert wire.forwarded[-1] == {"id": 6, "type": "ping"}
+
+
+@pytest.mark.parametrize("bad", [0, -3, True, "8", 2.5, None, [8]])
+def test_an_id_that_is_no_positive_number_gets_nowhere(bad):
+    session, wire = _session(_access())
+    session.handle({"id": bad, "type": "get_states"})
+    assert not wire.forwarded and not session._types and wire.answers[0]["success"] is False
+
+
+def test_an_answer_to_nothing_asked_from_here_is_not_passed_on():
+    session, wire = _session(_access())
+    states = [{"entity_id": "lock.safe", "state": "unlocked"}]
+    assert session._filter_outbound({"id": 9, "type": "result", "success": True, "result": states}) is None
+    assert session._filter_outbound({"type": "event", "event": {"data": states}}) is None
+    assert session._filter_outbound({"id": "9", "type": "result", "success": False, "error": {}}) is None
+    session._send("not json at all")
+    session._send(json.dumps([{"id": 9, "type": "result", "success": True, "result": states}]))
+    assert not wire.answers
+
+
+def test_an_event_is_passed_on_only_for_a_request_that_has_events():
+    session, _ = _session(_access())
+    session._types.update({1: "get_states", 2: "ping", 3: "subscribe_entities", 4: "lovelace/config"})
+    leak = {"type": "event", "event": {"a": {"lock.safe": {"s": "unlocked"}}}}
+    assert session._filter_outbound({"id": 1, **leak}) is None
+    assert session._filter_outbound({"id": 2, **leak}) is None
+    assert session._filter_outbound({"id": 4, **leak}) is None
+    assert session._filter_outbound({"id": 3, **leak})["event"] == {"a": {}}
+    assert session._filter_outbound({"id": 2, "type": "pong"}) == {"id": 2, "type": "pong"}
+    assert session._filter_outbound({"id": 1, "type": "pong"}) is None
+
+
+# -- what is published now, not what was when the page connected --------------------------
+
+
+def test_an_open_page_is_held_to_what_is_published_now():
+    now = {"access": _access()}
+    session, wire = _session(now["access"])
+    session._access_now = lambda: now["access"]
+    session.handle({"id": 1, "type": "subscribe_entities"})
+    assert wire.forwarded[0]["entity_ids"] == ["camera.front", "light.porch", "sensor.pv"]
+    # The owner takes the porch light off the dashboard.
+    now["access"] = Access(entities={"sensor.pv"}, statistics={"sensor.pv"})
+    out = session._filter_outbound({"id": 1, "type": "event", "event": {
+        "c": {"light.porch": {"+": {"s": "on"}}, "sensor.pv": {"+": {"s": "4"}}}}})
+    assert out["event"]["c"] == {"sensor.pv": {"+": {"s": "4"}}}
+    session.handle({"id": 2, "type": "history/history_during_period", "entity_ids": ["light.porch"]})
+    session.handle({"id": 3, "type": "render_template", "template": "{{ states('light.porch') }}"})
+    assert [m["id"] for m in wire.forwarded] == [1], "no longer published"
+
+
+# -- frontend settings and the energy settings ---------------------------------------------
+
+
+def test_system_data_is_the_same_few_keys_read_or_subscribed_to():
+    for kind in ("frontend/get_system_data", "frontend/subscribe_system_data"):
+        session, wire = _ask(type=kind, key="core")
+        assert wire.forwarded and not wire.answers, kind
+    session, wire = _ask(type="frontend/get_system_data", key="home")
+    assert _refused(wire)
+    session, wire = _ask(type="frontend/subscribe_system_data", key="home")
+    assert not wire.forwarded
+    assert wire.answers == [{"id": 7, "type": "event", "event": {"value": None}},
+                            {"id": 7, "type": "result", "success": True, "result": None}]
+    session.handle({"id": 8, "type": "unsubscribe_events", "subscription": 7})
+    assert not wire.forwarded and wire.answers[-1]["success"] is True
+    session, wire = _ask(type="frontend/subscribe_system_data")
+    assert not wire.forwarded, "no key: not everything"
+
+
+def _energy(shown):
+    access = _access()
+    access.energy = shown
+    access.statistics |= {"sensor.grid", "sensor.co2"}
+    return access
+
+
+@pytest.mark.parametrize("kind", ["energy/get_prefs", "energy/info", "energy/validate", "energy/solar_forecast"])
+def test_the_energy_settings_are_a_visitors_only_if_the_link_shows_energy(kind):
+    session, wire = _ask(_energy(False), type=kind)
+    assert not wire.forwarded and wire.answers[0]["success"] is False
+    session, wire = _ask(_energy(True), type=kind)
+    assert wire.forwarded == [{"id": 7, "type": kind}]
+
+
+def test_without_energy_the_page_is_told_there_are_no_settings():
+    """Home Assistant's own answer where none are set; the frontend expects it."""
+    _, wire = _ask(_energy(False), type="energy/get_prefs")
+    assert wire.answers[0]["error"] == {"code": "not_found", "message": "No prefs"}
+    for kind in ("frontend/get_system_data", "frontend/subscribe_system_data"):
+        _, wire = _ask(_energy(False), type=kind, key="energy")
+        assert not wire.forwarded
+        _, wire = _ask(_energy(True), type=kind, key="energy")
+        assert wire.forwarded
+
+
+def test_fossil_consumption_is_worked_out_from_published_statistics_only():
+    ask = dict(type="energy/fossil_energy_consumption", start_time="2026-01-01T00:00:00Z",
+               end_time="2026-01-02T00:00:00Z", period="day")
+    _, wire = _ask(_energy(True), **ask, energy_statistic_ids=["sensor.grid"], co2_statistic_id="sensor.co2")
+    assert wire.forwarded
+    _, wire = _ask(_energy(True), **ask, energy_statistic_ids=["sensor.grid", "sensor.secret"], co2_statistic_id="sensor.co2")
+    assert _refused(wire)
+    _, wire = _ask(_energy(True), **ask, energy_statistic_ids=["sensor.grid"], co2_statistic_id="sensor.secret")
+    assert _refused(wire)
+    _, wire = _ask(_energy(True), **ask, energy_statistic_ids=["sensor.grid"])
+    assert _refused(wire)
 
 
 # -- signing for cards that ask in their own ways ------------------------------------------
@@ -506,10 +694,15 @@ def test_a_page_cannot_have_conditions_watched_without_end(monkeypatch):
     condition = {"condition": "state", "entity_id": "light.porch", "state": "on"}
     for msg_id in (1, 2, 3):
         session.handle({"id": msg_id, "type": "subscribe_condition", "condition": condition})
+        session._filter_outbound({"id": msg_id, "type": "result", "success": True, "result": None})
     assert [m["id"] for m in wire.forwarded] == [1, 2] and wire.answers[0]["success"] is False
     session.handle({"id": 4, "type": "unsubscribe_events", "subscription": 1})
     session.handle({"id": 5, "type": "subscribe_condition", "condition": condition})
     assert [m["id"] for m in wire.forwarded] == [1, 2, 4, 5]
+    # One that Home Assistant turned down does not count either.
+    session._filter_outbound({"id": 5, "type": "result", "success": False, "error": {"code": "invalid_format"}})
+    session.handle({"id": 6, "type": "subscribe_condition", "condition": condition})
+    assert wire.forwarded[-1]["id"] == 6
 
 
 # -- a link with several panels ------------------------------------------------

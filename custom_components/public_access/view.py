@@ -231,6 +231,7 @@ class PublicDashboardView(HomeAssistantView):
             public_path=self.public_path,
             dashboard=coordinator.dashboard,
             access=await coordinator.async_access(),
+            access_now=coordinator.current_access,
             publish=coordinator.publish,
             title=coordinator.public_title,
             notes=coordinator,

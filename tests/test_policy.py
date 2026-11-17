@@ -218,8 +218,10 @@ def test_only_a_template_written_in_a_view_is_trusted_as_it_is():
     made = access(strings={"{{ states('lock.safe') }}", "{{ area_entities('kitchen') }}"})
     assert made.template_trust("{{ states('lock.safe') }}") == "written"
     assert made.template_trust("{{ area_entities('kitchen') }}") == "written", "the owner may write anything"
+    pytest.importorskip("jinja2")
     assert made.template_trust("{{ states('sensor.pv') }}") == "checked"
-    assert made.template_trust("{% set a = 1 %}{{ states('lock.safe') }}") == "checked"
+    assert made.template_trust("{% set a = 1 %}{{ states('sensor.pv') }}") == "checked"
+    assert made.template_trust("{% set a = 1 %}{{ states('lock.safe') }}") is None, "not published, so not run"
 
 
 @pytest.mark.parametrize("template", [
@@ -304,16 +306,119 @@ def test_a_streams_description_loses_where_it_comes_from_and_who_watches():
     assert "10.0.4.109" not in str(policy.clean_stream_info(info))
 
 
-def test_an_entity_or_a_word_named_like_such_a_function_is_no_concern():
-    """`sensor.unavailable_entities` is an entity, not the listing of entities."""
+# -- templates a card assembled: read before they are run ------------------------------
+
+PUBLISHED = {"sensor.pv", "light.porch", "sensor.unavailable_entities"}
+GIVEN = {"entity": "sensor.pv", "e": "lock.safe",
+         "config": {"entity": "light.porch", "list": ["sensor.pv"], "values": "sensor.pv", "other": "lock.safe"}}
+
+
+@pytest.mark.parametrize("template", [
+    "{{ states('sensor.pv') }}",
+    "{{ states('sensor.unavailable_entities') }}",
+    "N/A - {% set n = states('sensor.unavailable_entities') | int(0) %}{{ n }} {{ 'Entity' if n == 1 else 'Entities' }}",
+    "{% set a = 1 %}{{ is_state('light.porch', 'on') }} {{ now().hour }} {{ states('sensor.pv') | float(0) | round(1) }}",
+    "{{ state_attr('sensor.pv', 'device_id') }} {{ 'closest' }} {{ 'area_entities' }}",
+    "{{ states(entity) }} {{ states(config.entity) }} {{ states(config['list'][0]) }}",
+    "{% for i in range(3) %}{{ loop.index }}{{ i }}{% if i > 1 %}{% break %}{% endif %}{% endfor %}",
+    "{% for e in [1, 2] %}{{ e * pi }}{% endfor %}",
+    "{{ [1, 2] | map('float') | sum }} {{ [1, 2] | select('odd') | list }} {{ [{'a': 1}] | selectattr('a', 'eq', 1) | list }}",
+    "{% set ns = namespace(n=0) %}{% set ns.n = ns.n + 1 %}{{ ns.n }}",
+    "{{ (as_timestamp(now()) - as_timestamp(states('sensor.pv'))) | timestamp_custom('%H:%M') }}",
+    "{{ 'on' if has_value('light.porch') else 'off' }} {{ states('sensor.pv') is number }}",
+    "{{ states.sensor.pv.state }} {{ states['light.porch'].attributes.brightness }} {{ relative_time(states.sensor.pv.last_changed) }}",
+    "plain text, no template at all",
+])
+def test_an_assembled_template_that_can_only_read_what_is_published_may_run(template):
+    pytest.importorskip("jinja2")
+    assert policy.assembled_template_problem(template, PUBLISHED, GIVEN) is None
+
+
+@pytest.mark.parametrize("template, why", [
+    # an entity that is not published, however it is named
+    ("{{ states('lock.safe') }}", "reads lock.safe"),
+    ("{{ states(e) }}", "reads lock.safe"),
+    ("{{ is_state(config.other, 'locked') }}", "reads lock.safe"),
+    ("{{ states('lock.' ~ 'safe') }}", "works out as it runs"),
+    ("{% for x in ['lock.safe'] %}{{ states(x) }}{% endfor %}", "works out as it runs"),
+    ("{% set entity = 'lock.safe' %}{{ states(entity) }}", "works out as it runs"),
+    ("{{ states(config.values) }}", "works out as it runs"),  # the dictionary's method, not its entry
+    ("{{ states(entity_id='lock.safe') }}", "without naming an entity"),
+    ("{{ states(*['lock.safe']) }}", "arguments it works out"),
+    # the states object, and reading by filter or test
+    ("{{ states.lock.safe.state }}", "reads lock.safe"),
+    ("{{ states['lock.safe'].state }}", "reads lock.safe"),
+    ("{{ states | list }}", "states other than for one entity"),
+    ("{{ states.lock | list }}", "states other than for one entity"),
+    ("{{ states['lock'] | list }}", "states other than for one entity"),
+    ("{{ states[config.other] }}", "states other than for one entity"),
+    ("{% for s in states.lock %}{{ s.state }}{% endfor %}", "states other than for one entity"),
+    ("{{ states.lock[e] }}", "states other than for one entity"),
+    ("{{ 'lock.safe' | states }}", "the filter states"),
+    ("{{ ['lock.safe'] | map('states') | list }}", "map with something other"),
+    ("{{ ['lock.safe'] | map(config.entity) | list }}", "map with something other"),
+    ("{{ ['lock.safe'] | expand | list }}", "the filter expand"),
+    ("{{ ['lock.safe'] | select('is_state', 'locked') | list }}", "select with something other"),
+    ("{{ 'lock.safe' is is_state('locked') }}", "the test is_state"),
+    ("{{ 'lock.safe' | has_value }}", "the filter has_value"),
+    # what reads the house without reading a state
+    ("{{ areas() }}", "uses areas"),
+    ("{{ entity_name('lock.safe') }}", "uses entity_name"),
+    ("{{ integration_entities('hue') }}", "uses integration_entities"),
+    ("{{ device_attr('abc', 'serial_number') }}", "uses device_attr"),
+    ("{{ distance(47.6, -122.3) }}", "uses distance"),
+    ("{{ issues() }} {{ config_entry_attr('x', 'title') }}", "uses"),
+    ("{{ a_function_home_assistant_adds_next_year() }}", "uses a_function"),
+    # a function reached without calling it by its name
+    ("{% set f = integration_entities %}{{ f('hue') }}", "calls what it works out"),
+    ("{{ [states][0]('lock.safe') }}", "calls what it works out"),
+    ("{{ iif(true, integration_entities)('hue') }}", "calls what it works out"),
+    ("{% for x in [1] %}{% set states = 1 %}{% endfor %}{{ states('lock.safe') }}", "another meaning"),
+    ("{% for now in [1] %}{% endfor %}{{ now() }}", "another meaning"),
+    ("{% for x in [1] %}{% set q = 1 %}{% endfor %}{{ q('kitchen') }}", "calls what it works out"),
+    # parts and reaches no assembled template needs
+    ("{% macro m() %}{{ states('sensor.pv') }}{% endmacro %}{{ m() }}", "a part (macro)"),
+    ("{% include 'x.jinja' %}", "a part (include)"),
+    ("{% from 'x.jinja' import y %}", "a part (fromimport)"),
+    ("{% filter upper %}x{% endfilter %}", "a part (filterblock)"),
+    ("{{ now().__class__ }}", "reaches into an object"),
+    ("{{ now()['__class__'] }}", "reaches into an object"),
+    ("{{ self }} {{ lipsum }}", "uses"),
+    ("{% if", "cannot be read"),
+])
+def test_an_assembled_template_that_could_read_anything_else_is_not_run(template, why):
+    pytest.importorskip("jinja2")
+    problem = policy.assembled_template_problem(template, PUBLISHED, GIVEN)
+    assert problem and why in problem, problem
+
+
+def test_names_the_real_environment_gives_a_meaning_are_not_taken_over():
+    """Set inside a loop, a name is the template's own there and Home
+    Assistant's function outside it. The check is told Home Assistant's names."""
+    jinja2 = pytest.importorskip("jinja2")
+    env = jinja2.Environment()
+    read = lambda text: (env.parse(text), {"area_entities", "e", "pi"})
+    taken = "{% for x in [1] %}{% set area_entities = 1 %}{% endfor %}{{ area_entities }}"
+    assert "another meaning" in policy.assembled_template_problem(taken, PUBLISHED, None, read)
+    assert policy.assembled_template_problem("{% for e in [1] %}{{ e }}{% endfor %}", PUBLISHED, None, read) is None
+    broken = lambda text: (_ for _ in ()).throw(RuntimeError("no parser"))
+    assert "cannot be read" in policy.assembled_template_problem("{{ 1 }}", PUBLISHED, None, broken)
+
+
+def test_a_template_as_large_as_a_book_is_not_read(monkeypatch):
+    pytest.importorskip("jinja2")
+    monkeypatch.setattr(policy, "MAX_TEMPLATE_NODES", 50)
+    assert policy.assembled_template_problem("{{ 1 + 2 }}" * 5, PUBLISHED) is None
+    assert policy.assembled_template_problem("{{ 1 + 2 }}" * 50, PUBLISHED) == "it is too large"
+
+
+def test_the_verdict_says_why_for_the_owner():
+    pytest.importorskip("jinja2")
     made = access()
-    for template in (
-        "{{ states('sensor.unavailable_entities') }}",
-        "{{ states.sensor.device_id.state }} {{ state_attr('sensor.pv', 'device_id') }}",
-        "{% set distance = 3 %}{{ distance }} {{ 'closest' }} {{ x.issues }}",
-        "N/A - {% set e = states('sensor.unavailable_entities') | int(0) %}{{ e }} {{ 'Entity' if e == 1 else 'Entities' }}",
-    ):
-        assert made.template_trust(template) == "checked", template
+    assert made.template_verdict("{{ states('sensor.pv') }}") == ("checked", "")
+    trust, why = made.template_verdict("{{ states('lock.safe') }}")
+    assert trust is None and "not written in a published view" in why and "lock.safe" in why
+    assert made.template_verdict(None)[0] is None
 
 
 # -- what UIX composes from the owner's text -------------------------------------------

@@ -5,6 +5,7 @@ life (it can be switched off, and can end by itself at a set time)."""
 
 from __future__ import annotations
 
+from datetime import timedelta
 import logging
 from typing import Any
 
@@ -14,14 +15,14 @@ from homeassistant.const import Platform
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv, issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.event import async_track_point_in_utc_time
+from homeassistant.helpers.event import async_track_point_in_utc_time, async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
 
 from homeassistant.helpers.storage import Store
 
 from . import assets
 from .const import CONF_PUBLIC_PATH, DOMAIN
-from .coordinator import PublicDashboardCoordinator
+from .coordinator import ACCESS_SECONDS, PublicDashboardCoordinator
 from .view import PublicDashboardView
 
 _LOGGER = logging.getLogger(__name__)
@@ -107,9 +108,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     def _dashboard_changed(_event: Event) -> None:
         """Re-sanitize after the owner edits the dashboard."""
         coordinator.invalidate()
+        # Pages that are open are not left with what was published before.
+        hass.async_create_task(coordinator.async_keep_current(), eager_start=False)
 
     entry.async_on_unload(
         hass.bus.async_listen(EVENT_LOVELACE_UPDATED, _dashboard_changed)
+    )
+    entry.async_on_unload(
+        async_track_time_interval(hass, coordinator.async_keep_current, timedelta(seconds=ACCESS_SECONDS))
     )
     entry.async_on_unload(entry.add_update_listener(_options_updated))
 

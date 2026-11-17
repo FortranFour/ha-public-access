@@ -82,6 +82,9 @@ class PublicDashboardCoordinator:
         self._listed_media = MediaMemory()
         self._access: Access | None = None
         self._access_at = 0.0
+        # What the dashboards and settings said the last time the access was
+        # worked out (see _async_read_access); a change hangs up on visitors.
+        self._said: tuple[Any, ...] | None = None
         # What visitors' pages asked for and did not get, for the owner's
         # diagnostics: the latest few, each kind of refusal once.
         self._refusals: deque[str] = deque(maxlen=40)
@@ -246,8 +249,25 @@ class PublicDashboardCoordinator:
 
     def invalidate(self) -> None:
         """Called when the dashboard or the options change: what the views
-        allow is worked out again for the next request."""
-        self._access = None
+        allow is worked out again, for the next request and for the pages
+        that are open (async_keep_current)."""
+        self._access_at = 0.0
+
+    def current_access(self) -> Access:
+        """What a visitor may read as last worked out, for a page that is
+        open. Nothing at all before the first time."""
+        return self._access if self._access is not None else Access(camera_streams=False)
+
+    async def async_keep_current(self, _now: Any = None) -> None:
+        """While somebody is looking, keep what they may read up to date: at
+        once after a dashboard was edited, and every half minute. Without a
+        visitor there is nothing to keep; the next one's first request works
+        it out afresh."""
+        if getattr(self, "sockets", None) and getattr(self, "active", True):
+            try:
+                await self.async_access()
+            except Exception:  # noqa: BLE001 - tried again in half a minute
+                _LOGGER.debug("Could not refresh what the link publishes", exc_info=True)
 
     # -- what a visitor receives -------------------------------------------------
 
@@ -285,8 +305,25 @@ class PublicDashboardCoordinator:
         """What a visitor may read, reused for a short while (ACCESS_SECONDS)."""
         now = time.monotonic()
         if self._access is None or now - self._access_at > ACCESS_SECONDS:
-            self._access = await self._async_read_access()
+            before = getattr(self, "_said", None)
+            # Marked fresh first: several requests arriving together work it
+            # out once, and an edit made meanwhile marks it stale again.
             self._access_at = now
+            try:
+                access = await self._async_read_access()
+            except BaseException:
+                self._access_at = 0.0
+                raise
+            self._access = access
+            if before is not None and self._said != before and getattr(self, "sockets", None):
+                # The dashboard, the energy settings or a shared card
+                # definition changed what this link publishes. Whoever has a
+                # page open is hung up on: the page connects again by itself
+                # and gets what is published now. Streams, signed requests
+                # and subscriptions started under the old rules end with the
+                # connection instead of running on.
+                _LOGGER.debug("What /%s publishes has changed: reconnecting its visitors", self.public_path)
+                await self.async_close_sockets()
         return self._access
 
     async def _async_read_access(self) -> Access:
@@ -330,7 +367,11 @@ class PublicDashboardCoordinator:
             conditions |= collect_conditions(plain) | collect_conditions(sent)
         energy_panel = any(p.kind == "energy" for p in self.panels)
         if not anything and not energy_panel and not any(p.kind == "frigate" for p in self.panels):
+            self._said = ()
             return Access(camera_streams=False)
+        # What the dashboards themselves say, before anything that depends on
+        # the state of the house is added.
+        said: list[Any] = [frozenset(entities), frozenset(statistics), frozenset(candidates)]
         # Cards that name no entities but pick them with filters
         # (auto-entities): what the filters select is published too.
         picked = await self._async_auto_entities(plains)
@@ -350,16 +391,25 @@ class PublicDashboardCoordinator:
             conditions |= collect_conditions(used)
         # Entity ids inside templates count only if such an entity exists.
         entities |= {c for c in candidates if self.hass.states.get(c) is not None}
-        prefs = await ha_data.async_energy_prefs(self.hass)
-        energy = ha_data.energy_statistic_ids(prefs)
-        statistics |= energy
-        if energy_panel or any(_ENERGY_CARD.match(value) for value in strings):
-            # Energy and power cards name no entities: they draw what the
-            # energy settings list, and need those sensors' live values too.
+        # The energy settings are published with the Energy dashboard or an
+        # energy card on a sent view, and not otherwise. Energy and power
+        # cards name no entities: they draw what the settings list, and need
+        # those sensors' live values too.
+        shows_energy = energy_panel or any(_ENERGY_CARD.match(value) for value in strings)
+        energy: set[str] = set()
+        if shows_energy:
+            prefs = await ha_data.async_energy_prefs(self.hass)
+            energy = ha_data.energy_statistic_ids(prefs)
+            statistics |= energy
             entities |= {e for e in energy if self.hass.states.get(e) is not None}
         # Statistics of plain sensors share the entity id.
         statistics |= entities
+        self._said = (
+            *said, frozenset(strings), frozenset(conditions), frozenset(energy), shows_energy,
+            tuple((p.path, p.kind, p.dashboard, p.views, p.support) for p in self.panels),
+        )
         return Access(
+            energy=shows_energy,
             entities=entities,
             statistics=statistics,
             strings=strings,
