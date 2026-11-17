@@ -112,7 +112,7 @@ def _session(access):
         lambda entity_id: object() if entity_id in EXISTING else None)})})()
     session._public_path, session._dashboard, session._title = "solar", "energy-public", "Solar"
     session._access_now = lambda: access
-    session._last_id, session._awaiting, session._read_template = 0, set(), None
+    session._last_id, session._awaiting, session._read_template, session._subjects = 0, set(), None, {}
     session._publish = _coordinator(views=["overview"]).publish
     session._types, session._watched, session.notes = {}, {}, []
     session._conditions = set()
@@ -785,3 +785,86 @@ def test_the_startup_note_is_taken_quietly():
     assert not wire.forwarded and wire.answers == [{"id": 4, "type": "result", "success": True, "result": None}]
     session.handle({"id": 5, "type": "unsubscribe_events", "subscription": 4})
     assert not wire.forwarded, "and so is cancelling it"
+
+
+# -- streams that run on are held to what is published when each piece is sent -----------------
+
+
+def test_a_history_stream_leaves_out_what_is_no_longer_published():
+    now = {"access": _access()}
+    session, wire = _session(now["access"])
+    session._access_now = lambda: now["access"]
+    session.handle({"id": 1, "type": "history/stream", "entity_ids": ["light.porch", "sensor.pv", "lock.safe"]})
+    assert wire.forwarded[0]["entity_ids"] == ["light.porch", "sensor.pv"]
+    piece = lambda: {"id": 1, "type": "event", "event": {"states": {"light.porch": [{"s": "on"}], "sensor.pv": [{"s": "4"}]}, "start_time": 1, "end_time": 2}}
+    assert set(session._filter_outbound(piece())["event"]["states"]) == {"light.porch", "sensor.pv"}
+    # The porch light drops out of a list that picks its own entities.
+    now["access"] = Access(entities={"sensor.pv"})
+    out = session._filter_outbound(piece())
+    assert out["event"]["states"] == {"sensor.pv": [{"s": "4"}]} and out["event"]["end_time"] == 2
+    session._types[2] = "history/history_during_period"
+    answer = session._filter_outbound({"id": 2, "type": "result", "success": True, "result": {"light.porch": [], "sensor.pv": []}})
+    assert set(answer["result"]) == {"sensor.pv"}
+
+
+def test_logbook_lines_are_held_to_what_is_published_now():
+    session, _ = _session(Access(entities={"sensor.pv"}))
+    session._types.update({1: "logbook/event_stream", 2: "logbook/get_events"})
+    lines = [{"entity_id": "sensor.pv", "state": "4", "context_user_id": "u1"}, {"entity_id": "light.porch", "state": "on"},
+             {"entity_id": None, "message": "x"}, {"name": "Home Assistant", "message": "started"}]
+    out = session._filter_outbound({"id": 1, "type": "event", "event": {"events": [dict(l) for l in lines]}})
+    assert out["event"]["events"] == [{"entity_id": "sensor.pv", "state": "4"}, {"name": "Home Assistant", "message": "started"}]
+    out = session._filter_outbound({"id": 2, "type": "result", "success": True, "result": [dict(l) for l in lines]})
+    assert [l.get("entity_id") for l in out["result"]] == ["sensor.pv", None]
+
+
+@pytest.mark.parametrize("kind, extra", [
+    ("weather/subscribe_forecast", {"forecast_type": "daily"}),
+    ("calendar/event/subscribe", {"start": "2026-11-01T00:00:00Z", "end": "2026-12-01T00:00:00Z"}),
+])
+def test_a_forecast_or_calendar_stops_when_its_entity_is_no_longer_published(kind, extra):
+    now = {"access": Access(entities={"weather.home", "calendar.bins"})}
+    session, wire = _session(now["access"])
+    session._access_now = lambda: now["access"]
+    entity = "weather.home" if kind.startswith("weather") else "calendar.bins"
+    session.handle({"id": 3, "type": kind, "entity_id": entity, **extra})
+    wire.subscriptions[3] = lambda: wire.ended.append(3)
+    event = {"id": 3, "type": "event", "event": {"forecast": [], "events": []}}
+    assert session._filter_outbound(dict(event)) is not None and not wire.ended
+    now["access"] = Access(entities=set())
+    assert session._filter_outbound(dict(event)) is None and wire.ended == [3]
+
+
+# -- templates the owner wrote with entity tokens (Dashboard References) ------------------------
+
+TOKENED = ("{% set w = '[[entity:weather]]' %}{% macro deg(x) %}{{ x | round }}°{% endmacro %}"
+           "{{ states(w) | title }} {{ deg(state_attr('[[entity:weather]]', 'temperature')) }} at {{ area_name('[[entity:porch]]') }}")
+
+
+def _tokened():
+    access = _access()
+    access.entities |= {"weather.home"}
+    access.strings |= {TOKENED}
+    return access
+
+
+def test_the_owners_template_with_its_tokens_filled_in_is_rendered_under_watch():
+    """It uses a macro and area_name, which no template a card merely
+    assembled may; but every word of it is the owner's, and the page only
+    said which published entities stand where the tokens were."""
+    filled = TOKENED.replace("[[entity:weather]]", "weather.home").replace("[[entity:porch]]", "light.porch")
+    session, wire = _ask(_tokened(), type="render_template", template=filled, timeout=10, report_errors=True)
+    assert wire.forwarded and wire.forwarded[0]["timeout"] == 5 and wire.forwarded[0]["report_errors"] is False
+    assert 7 in session._watched
+
+
+@pytest.mark.parametrize("change", [
+    lambda t: t.replace("[[entity:weather]]", "lock.safe").replace("[[entity:porch]]", "light.porch"),      # not published
+    lambda t: t.replace("[[entity:weather]]", "weather.home", 1).replace("[[entity:weather]]", "sensor.pv").replace("[[entity:porch]]", "light.porch"),  # one token, two entities
+    lambda t: t.replace("[[entity:weather]]", "weather.home").replace("[[entity:porch]]", "light.porch") + "{{ areas() }}",   # something added
+    lambda t: t.replace("[[entity:weather]]", "weather.home').state ~ states('lock.safe").replace("[[entity:porch]]", "light.porch"),  # more than an entity in a token's place
+    lambda t: t.replace("[[entity:weather]]", "weather.home").replace("[[entity:porch]]", "light.porch").replace("title", "upper"),  # a word changed
+])
+def test_anything_but_published_entities_in_the_tokens_places_is_not_that(change):
+    session, wire = _ask(_tokened(), type="render_template", template=change(TOKENED))
+    assert _refused(wire) and not session._watched

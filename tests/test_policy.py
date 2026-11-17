@@ -327,6 +327,7 @@ GIVEN = {"entity": "sensor.pv", "e": "lock.safe",
     "{{ (as_timestamp(now()) - as_timestamp(states('sensor.pv'))) | timestamp_custom('%H:%M') }}",
     "{{ 'on' if has_value('light.porch') else 'off' }} {{ states('sensor.pv') is number }}",
     "{{ states.sensor.pv.state }} {{ states['light.porch'].attributes.brightness }} {{ relative_time(states.sensor.pv.last_changed) }}",
+    "{% set w = 'sensor.pv' %}{{ states(w) | title }} {{ state_attr(w, 'unit') }}{% for i in [1] %}{{ is_state(w, 'x') }}{% endfor %}",
     "plain text, no template at all",
 ])
 def test_an_assembled_template_that_can_only_read_what_is_published_may_run(template):
@@ -343,6 +344,11 @@ def test_an_assembled_template_that_can_only_read_what_is_published_may_run(temp
     ("{% for x in ['lock.safe'] %}{{ states(x) }}{% endfor %}", "works out as it runs"),
     ("{% set entity = 'lock.safe' %}{{ states(entity) }}", "works out as it runs"),
     ("{{ states(config.values) }}", "works out as it runs"),  # the dictionary's method, not its entry
+    ("{% set w = 'lock.safe' %}{{ states(w) }}", "reads lock.safe"),
+    ("{% set w = 'sensor.pv' %}{% if true %}{% set w = 'lock.safe' %}{{ states(w) }}{% endif %}", "works out as it runs"),
+    ("{% if true %}{% set w = 'sensor.pv' %}{% endif %}{{ states(w) }}", "works out as it runs"),
+    ("{{ states(e) }}{% set e = 'sensor.pv' %}", "works out as it runs"),  # e is also sent along: which one counts depends on the line
+    ("{% set w = 'sensor.' ~ 'pv' %}{{ states(w) }}", "works out as it runs"),
     ("{{ states(entity_id='lock.safe') }}", "without naming an entity"),
     ("{{ states(*['lock.safe']) }}", "arguments it works out"),
     # the states object, and reading by filter or test
@@ -755,3 +761,74 @@ def test_frigates_statistics_lose_other_cameras_and_command_lines():
     out = policy.public_frigate_stats(stats, {"front"})
     assert list(out["cameras"]) == ["front"] and "cmdline" not in json.dumps(out) and "pw@" not in json.dumps(out)
     assert out["cpu_usages"]["12"] == {"cpu": "1"} and out["service"]["version"] == "0.18.2"
+
+
+# -- Frigate's interface: no settings, no menus, no hardware ------------------------------
+
+
+@pytest.mark.parametrize("page", [
+    "settings", "/settings", "settings/", "Settings", "system", "config", "logs", "faces",
+    "classification", "chat", "playground", "replay", "settings/anything",
+])
+def test_frigates_settings_and_administrator_pages_are_not_a_visitors(page):
+    assert policy.frigate_ui_hidden_page(page)
+
+
+@pytest.mark.parametrize("page", ["", "review", "explore", "export", "api/config", "api/settings", "settingsx", "assets/settings.js", None])
+def test_its_own_pages_and_its_data_are_not_mistaken_for_those(page):
+    assert not policy.frigate_ui_hidden_page(page)
+
+
+def test_what_frigate_answers_with_its_page():
+    for path in ("", "review", "explore", "unauthorized", "anything/else"):
+        assert policy.frigate_ui_page_like(path), path
+    for path in ("api/config", "api/review", "assets/index-abc.js", "locales/en/common.json", "live/jsmpeg/front",
+                 "ws", "vod/front/start/1/end/2/master.m3u8", "clips/front.jpg", "notifications-worker.js", "images/x.svg"):
+        assert not policy.frigate_ui_page_like(path), path
+
+
+def test_the_guard_put_into_frigates_page():
+    guard = policy.frigate_page_guard("/home_frigate/ui")
+    assert guard.startswith("<style data-public-access>") and guard.endswith("</script>")
+    assert "aside>div:last-of-type{display:none!important}" in guard
+    for page in policy.FRIGATE_HIDDEN_PAGES:
+        assert f'a[href^="/home_frigate/ui/{page}"]' in guard
+    assert 'var base="/home_frigate/ui"' in guard
+    assert ":has(svg:has(" not in guard, "a :has() inside a :has() is no selector at all"
+    assert "</script>" not in guard[:-9] and "</style>" not in guard.split("<script")[1]
+
+
+@pytest.mark.parametrize("base", ["", "home/ui", "/home_frigate/ui\"><script>", "/a b", "/a'b", "/a</style>"])
+def test_the_guard_is_made_only_for_a_plain_address(base):
+    with pytest.raises(ValueError):
+        policy.frigate_page_guard(base)
+
+
+def test_statistics_do_not_name_the_hardware():
+    stats = {
+        "cameras": {"front": {"camera_fps": 5}, "attic": {"camera_fps": 5}},
+        "gpu_usages": {"Example 9000 iGPU": {"gpu": "100%"}}, "npu_usages": {"Some NPU": {"npu": "1%"}},
+        "cpu_usages": {"frigate.full_system": {"cpu": "32.0"}, "7": {"cpu": "1", "cmdline": "ffmpeg -i rtsp://u:p@10.0.0.9/x"}},
+        "service": {"storage": {"/dev/shm": {"free": 1}}},
+    }
+    out = policy.public_frigate_stats(stats, {"front"})
+    assert "gpu_usages" not in out and "npu_usages" not in out and "iGPU" not in json.dumps(out)
+    assert set(out["cameras"]) == {"front"} and "cmdline" not in json.dumps(out)
+    assert out["service"]["storage"] == {"/dev/shm": {"free": 1}}, "the interface reads this on its way in"
+    assert "gpu_usages" in stats, "the original is left as it was"
+
+
+def test_tokens_filled_in_match_only_the_owners_text_with_entities_in_their_places():
+    text = "{{ states('[[entity:a]]') }} and {{ states('[[entity:b]]') }}, {{ states('[[entity:a]]') }} again (.*)"
+    patterns = policy.token_patterns({text, "no tokens here", "{{ 1 }}"})
+    assert len(patterns) == 1
+    ok = {"sensor.pv", "light.porch"}
+    fill = lambda a, b, a2=None: text.replace("[[entity:a]]", a, 1).replace("[[entity:b]]", b).replace("[[entity:a]]", a2 or a)
+    assert policy.filled_from_written(fill("sensor.pv", "light.porch"), patterns, ok)
+    assert policy.filled_from_written(fill("sensor.pv", "sensor.pv"), patterns, ok)
+    assert not policy.filled_from_written(fill("sensor.pv", "lock.safe"), patterns, ok)
+    assert not policy.filled_from_written(fill("sensor.pv", "light.porch", "light.porch"), patterns, ok)
+    assert not policy.filled_from_written(fill("sensor.pv", "light.porch").replace("(.*)", "anything"), patterns, ok), "the text is taken literally"
+    assert not policy.filled_from_written(fill("sensor.pv", "light.porch") + " ", patterns, ok)
+    assert not policy.filled_from_written(fill("sensor.pv') }}{{ states('lock.safe", "light.porch"), patterns, ok)
+    assert not policy.filled_from_written(text, patterns, ok)

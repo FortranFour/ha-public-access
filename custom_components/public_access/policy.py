@@ -147,22 +147,27 @@ def _kind(node: Any) -> str:
     return type(node).__name__
 
 
-def _known_value(node: Any, given: dict[str, Any], assigned: set[str]) -> Any:
+def _known_value(
+    node: Any, given: dict[str, Any], assigned: set[str], fixed: dict[str, Any] | None = None
+) -> Any:
     """The value of an expression that is fixed before the template runs: a
-    literal, or a place in the variables sent along with it. LookupError for
-    anything worked out while it runs."""
+    literal, a place in the variables sent along with it, or a name the
+    template sets once, at its top, to a literal (``fixed``). LookupError
+    for anything worked out while it runs."""
     kind = _kind(node)
     if kind == "Const":
         return node.value
+    if kind == "Name" and node.ctx == "load" and fixed and node.name in fixed:
+        return fixed[node.name]
     if kind == "Name" and node.ctx == "load" and node.name in given and node.name not in assigned:
         return given[node.name]
     if kind == "Getattr":
-        base = _known_value(node.node, given, assigned)
+        base = _known_value(node.node, given, assigned, fixed)
         # "config.items" is the dictionary's method, not its "items" entry.
         if isinstance(base, dict) and node.attr in base and not hasattr(dict, node.attr):
             return base[node.attr]
     elif kind == "Getitem" and _kind(node.arg) == "Const":
-        base = _known_value(node.node, given, assigned)
+        base = _known_value(node.node, given, assigned, fixed)
         key = node.arg.value
         if isinstance(base, dict) and isinstance(key, str) and key in base:
             return base[key]
@@ -237,6 +242,19 @@ def assembled_template_problem(
     for node in nodes:
         if _kind(node) not in _TEMPLATE_PARTS:
             return f"it uses a part ({_kind(node).lower()}) only a template written in a published view may"
+    # "{% set w = 'weather.home' %}" at the top of the template, and w set
+    # nowhere else: w is that text wherever it is used. (Used before the
+    # line, it is nothing at all, which reads nothing.)
+    stores: dict[str, int] = {}
+    for node in nodes:
+        if _kind(node) == "Name" and node.ctx in ("store", "param"):
+            stores[node.name] = stores.get(node.name, 0) + 1
+    fixed = {
+        part.target.name: part.node.value
+        for part in getattr(tree, "body", [])
+        if _kind(part) == "Assign" and _kind(part.target) == "Name" and _kind(part.node) == "Const"
+        and stores.get(part.target.name) == 1 and part.target.name not in given
+    }
     called: dict[int, Any] = {}
     for node in nodes:
         kind = _kind(node)
@@ -293,7 +311,7 @@ def assembled_template_problem(
                 if not call.args:
                     return f"it calls {name} without naming an entity"
                 try:
-                    entity = _known_value(call.args[0], given, assigned)
+                    entity = _known_value(call.args[0], given, assigned, fixed)
                 except LookupError:
                     return f"it works out as it runs which entity {name} reads"
                 if not isinstance(entity, str) or entity not in entities:
@@ -398,6 +416,48 @@ def composed_of_written(template: str, written: set[str]) -> bool:
             return False
         rest = rest[1:]
     return rest != template and rest in written
+
+
+# Dashboard References (custom:dashboard-entity-reference) lets the owner
+# write "[[entity:name]]" in a card and puts the entity it stands for in its
+# place in the browser, in templates too. Such a template reaches Home
+# Assistant as the owner's text with entity ids where the tokens were.
+_REFERENCE_TOKEN = re.compile(r"\[\[entity:([A-Za-z0-9_.-]+)\]\]")
+_REFERENCE_FILL = r"[a-z_]+\.[a-z0-9_]+"
+
+
+def token_patterns(written: Iterable[str]) -> list[Any]:
+    """For every written text with entity tokens: what it looks like filled in."""
+    patterns = []
+    for text in written:
+        if "[[entity:" not in text or len(text) > MAX_CHECKED_TEMPLATE_LENGTH:
+            continue
+        parts, names, at = [], {}, 0
+        for token in _REFERENCE_TOKEN.finditer(text):
+            parts.append(re.escape(text[at:token.start()]))
+            name = token.group(1)
+            if name in names:
+                # The same token is the same entity everywhere.
+                parts.append(f"(?P={names[name]})")
+            else:
+                names[name] = f"t{len(names)}"
+                parts.append(f"(?P<{names[name]}>{_REFERENCE_FILL})")
+            at = token.end()
+        if not names or len(names) > 90:
+            continue
+        parts.append(re.escape(text[at:]))
+        patterns.append(re.compile("".join(parts), re.DOTALL))
+    return patterns
+
+
+def filled_from_written(template: str, patterns: Iterable[Any], entities: Iterable[str]) -> bool:
+    """Is this template a text the owner wrote with ``[[entity:...]]`` tokens,
+    each token filled with a published entity and nothing else changed?"""
+    for pattern in patterns:
+        found = pattern.fullmatch(template)
+        if found and all(entity in entities for entity in found.groupdict().values()):
+            return True
+    return False
 
 
 FRIGATE_KINDS = frozenset(
@@ -539,6 +599,8 @@ class Access:
     # Does the link show the energy settings: the Energy dashboard, or an
     # energy card on a published view? If not they are not a visitor's.
     energy: bool = False
+    # The written texts with entity tokens, as patterns; made on first use.
+    _token_patterns: list[Any] | None = field(default=None, repr=False, compare=False)
 
     def entity_allowed(self, entity_id: Any) -> bool:
         return isinstance(entity_id, str) and entity_id in self.entities
@@ -558,7 +620,9 @@ class Access:
         UIX foundry such a view uses, or it is what UIX composes from such
         text), so the owner wrote it for this page; it is rendered as it is.
 
-        ``"checked"``: some card put it together in the browser. It is read
+        ``"checked"``: some card put it together in the browser. Either it
+        is the owner's text with published entities in the place of its
+        ``[[entity:...]]`` tokens (``filled_from_written``), or it is read
         first (``assembled_template_problem``) and rendered only if it can
         read nothing but published entities. Rendered, it is watched as well:
         Home Assistant reports which entities a template read, and the result
@@ -575,6 +639,14 @@ class Access:
             return None, "it is not written in a published view and is very long"
         if composed_of_written(template, self.strings):
             return "written", ""
+        if self._token_patterns is None:
+            self._token_patterns = token_patterns(self.strings)
+        if filled_from_written(template, self._token_patterns, self.entities):
+            # The owner's text with published entities where its tokens
+            # were: what it does is the owner's, so it is not read against
+            # the list of what an assembled template may use. Which entity
+            # stands where is the page's word, so it is watched all the same.
+            return "checked", ""
         problem = assembled_template_problem(template, self.entities, variables, read)
         if problem:
             return None, "it is not written in a published view, and " + problem
@@ -1097,6 +1169,16 @@ _FRIGATE_NEVER = re.compile(
     re.IGNORECASE,
 )
 _FRIGATE_PATH = re.compile(r"^[A-Za-z0-9_\-./,:@+~ ]*$")
+# Pages of Frigate's interface that are not a visitor's: its settings (they
+# only change the look in the visitor's own browser, but they are switches,
+# and a read-only page has none), and the pages Frigate keeps for
+# administrators anyway.
+FRIGATE_HIDDEN_PAGES = (
+    "settings", "system", "config", "logs", "faces", "classification", "chat", "playground", "replay",
+)
+_FRIGATE_HIDDEN_PAGE = re.compile(r"^(?:" + "|".join(FRIGATE_HIDDEN_PAGES) + r")(?:/|$)", re.IGNORECASE)
+# The gear in Frigate's sidebar and bottom bar, by its drawing.
+_FRIGATE_GEAR = 'svg > path[d^="M12.22 2h-.44"]'
 _FRIGATE_SECRET_KEYS = frozenset({"password", "api_key", "auth_secret", "secret", "token", "user", "host"})
 _FRIGATE_DROPPED = ("environment_vars", "proxy", "tls", "database", "notifications", "telemetry", "logger")
 
@@ -1113,6 +1195,54 @@ def frigate_ui_path(raw: Any) -> str | None:
     if _FRIGATE_NEVER.match(path):
         return None
     return path
+
+
+def frigate_ui_hidden_page(raw: Any) -> bool:
+    """Is this address one of the pages of Frigate's interface a visitor
+    does not get (asked for as a page, not as ``api/...``)?"""
+    return isinstance(raw, str) and _FRIGATE_HIDDEN_PAGE.match(raw.lstrip("/")) is not None
+
+
+def frigate_ui_page_like(path: str) -> bool:
+    """Would Frigate answer this address with its interface's page (rather
+    than data, a picture, a script)?"""
+    last = path.rsplit("/", 1)[-1]
+    return "." not in last and not path.startswith(("api/", "live/", "vod/", "clips/", "recordings/", "exports/", "ws"))
+
+
+def frigate_page_guard(base: str) -> str:
+    """What is put into Frigate's page before a visitor gets it: its settings
+    and account menus and its links to the hidden pages are taken out of
+    sight, and a move to one of those pages, however it is made, ends on the
+    live view instead. ``base`` is the public address the interface is under
+    ("/home_frigate/ui"); only letters, digits, "_" and "/" are in it."""
+    if not re.fullmatch(r"/[A-Za-z0-9_/]+", base):
+        raise ValueError("unexpected base address")
+    hidden = ",".join(f'a[href^="{base}/{page}"]' for page in FRIGATE_HIDDEN_PAGES)
+    style = (
+        # the settings and account menus at the foot of the sidebar
+        "aside>div:last-of-type{display:none!important}"
+        # the settings menu wherever else it is put (a phone's bottom bar)
+        f"[aria-haspopup]:has({_FRIGATE_GEAR}){{display:none!important}}"
+        f"{hidden}{{display:none!important}}"
+    )
+    pages = "|".join(FRIGATE_HIDDEN_PAGES)
+    script = (
+        "(function(){"
+        f"var base={json.dumps(base)},no=/^\\/(?:{pages})(?:\\/|$)/i;"
+        "function bad(u){try{var x=new URL(u,location.href);"
+        "return x.origin===location.origin&&x.pathname.indexOf(base+'/')===0&&no.test(x.pathname.slice(base.length));}"
+        "catch(e){return false;}}"
+        "function home(){location.replace(base+'/');}"
+        "['pushState','replaceState'].forEach(function(n){var o=history[n];"
+        "history[n]=function(s,t,u){if(u!=null&&bad(u)){home();return;}return o.apply(this,arguments);};});"
+        "document.addEventListener('click',function(e){var a=e.target&&e.target.closest&&e.target.closest('a[href]');"
+        "if(a&&bad(a.href)){e.preventDefault();e.stopPropagation();}},true);"
+        "window.addEventListener('popstate',function(){if(bad(location.href))home();});"
+        "if(bad(location.href))home();"
+        "})();"
+    )
+    return f"<style data-public-access>{style}</style><script data-public-access>{script}</script>"
 
 
 def frigate_socket_message(text: Any) -> str | None:
@@ -1184,12 +1314,13 @@ def public_frigate_config(config: Any, cameras: Iterable[str]) -> Any:
 
 
 def public_frigate_stats(stats: Any, cameras: Iterable[str]) -> Any:
-    """Frigate's statistics with only the published cameras, and without
-    the commands its processes were started with."""
+    """Frigate's statistics with only the published cameras, without the
+    commands its processes were started with, and without the graphics and
+    neural processors, which are listed by the name of the hardware."""
     if not isinstance(stats, dict):
         return stats
     allowed = set(cameras)
-    out = dict(stats)
+    out = {key: value for key, value in stats.items() if key not in ("gpu_usages", "npu_usages")}
     if isinstance(out.get("cameras"), dict):
         out["cameras"] = {name: value for name, value in out["cameras"].items() if name in allowed}
     for key in ("cpu_usages", "processes"):

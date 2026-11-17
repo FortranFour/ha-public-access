@@ -56,6 +56,8 @@ from .const import MAX_PUBLIC_SESSIONS
 STORAGE_VERSION = 1
 STORAGE_KEY = "public_access.viewer"
 VIEWER_NAME = "Public Access viewer"
+LINK_TOKEN_NAME = "Public Access link "
+LEGACY_TOKEN_NAME = "Public Access mirror"
 
 # Concurrent public websocket connections, in total. The view refuses extra
 # visitors before the upgrade; this is the backstop behind it.
@@ -270,29 +272,74 @@ QUIET_TYPES: dict[str, Any] = {
 _connections = 0
 
 
-async def async_get_viewer(hass: HomeAssistant) -> tuple[User, RefreshToken]:
-    """The read-only system user the mirrored connection runs as.
+def _token_name(link: str | None) -> str:
+    return f"{LINK_TOKEN_NAME}{link}" if link else LEGACY_TOKEN_NAME
 
-    Created once and remembered; a refresh token is needed only because Home
-    Assistant's connection object wants one for its audit context.
-    """
-    store: Store[dict[str, str]] = Store(hass, STORAGE_VERSION, STORAGE_KEY)
-    data = await store.async_load() or {}
+
+async def _async_viewer_user(hass: HomeAssistant, create: bool = True) -> User | None:
+    """The read-only system user everything a visitor does runs as."""
     user = None
-    if user_id := data.get("user_id"):
+    if user_id := hass.data.get(STORAGE_KEY):
         user = await hass.auth.async_get_user(user_id)
     if user is None or not user.is_active:
-        user = await hass.auth.async_create_system_user(
-            VIEWER_NAME, group_ids=[GROUP_ID_READ_ONLY]
-        )
-        await store.async_save({"user_id": user.id})
-        _LOGGER.info("Created the read-only viewer user %s", user.id)
-    token = next(iter(user.refresh_tokens.values()), None)
+        store: Store[dict[str, str]] = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+        data = await store.async_load() or {}
+        user = None
+        if user_id := data.get("user_id"):
+            user = await hass.auth.async_get_user(user_id)
+        if user is None or not user.is_active:
+            if not create:
+                return None
+            user = await hass.auth.async_create_system_user(
+                VIEWER_NAME, group_ids=[GROUP_ID_READ_ONLY]
+            )
+            await store.async_save({"user_id": user.id})
+            _LOGGER.info("Created the read-only viewer user %s", user.id)
+        hass.data[STORAGE_KEY] = user.id
+    return user
+
+
+async def async_get_viewer(hass: HomeAssistant, link: str | None = None) -> tuple[User, RefreshToken]:
+    """The read-only system user the mirrored connection runs as, and the
+    link's own token of that user.
+
+    Home Assistant's connection object wants a token for its audit context,
+    and every link Home Assistant signs for a visitor (a picture, a clip) is
+    signed under one and is good only while that token exists. So each
+    public link has its own, and taking it away (``async_forget_link_token``)
+    ends every signed link handed out for that public link at once.
+    """
+    user = await _async_viewer_user(hass)
+    name = _token_name(link)
+    token = next((t for t in user.refresh_tokens.values() if t.client_name == name), None)
     if token is None:
-        token = await hass.auth.async_create_refresh_token(
-            user, client_name="Public Access mirror"
-        )
+        token = await hass.auth.async_create_refresh_token(user, client_name=name)
+    if link:
+        # The one token all links shared before 0.8.6.
+        for old in [t for t in user.refresh_tokens.values() if t.client_name == LEGACY_TOKEN_NAME]:
+            await _async_remove_token(hass, old)
     return user, token
+
+
+async def _async_remove_token(hass: HomeAssistant, token: RefreshToken) -> None:
+    result = hass.auth.async_remove_refresh_token(token)
+    if hasattr(result, "__await__"):
+        await result
+
+
+async def async_forget_link_token(hass: HomeAssistant, link: str) -> None:
+    """End every signed link handed out for this public link: Home Assistant
+    honours a signed link only while the token it was signed under exists.
+    The next visitor's request makes a new token."""
+    try:
+        user = await _async_viewer_user(hass, create=False)
+        if user is None:
+            return
+        name = _token_name(link)
+        for token in [t for t in user.refresh_tokens.values() if t.client_name == name]:
+            await _async_remove_token(hass, token)
+    except Exception:  # noqa: BLE001 - the link is being closed either way
+        _LOGGER.debug("Could not take away a link's token", exc_info=True)
 
 
 # The page scripts and the frontend glue (the "lovelace" alias panel, silent
@@ -350,6 +397,9 @@ class MirrorSession:
         self._last_id = 0
         # Requests passed on and not answered yet.
         self._awaiting: set[int] = set()
+        # Subscriptions that are about one entity (a forecast, a calendar),
+        # and which: its events stop when the entity is no longer published.
+        self._subjects: dict[int, str] = {}
         # render_template subscriptions whose results are checked before
         # they are passed on, with their text for the owner's diagnostics.
         self._watched: dict[int, str] = {}
@@ -469,7 +519,11 @@ class MirrorSession:
                     if isinstance(s, dict) and s.get("statistic_id") in self._statistics
                 ]
             elif kind == "logbook/get_events" and isinstance(result, list):
-                message["result"] = [self._logbook_entry(e) for e in result if isinstance(e, dict)]
+                message["result"] = self._logbook_entries(result)
+            elif kind == "history/history_during_period" and isinstance(result, dict):
+                # Asked for published entities only; checked again on the way
+                # back, against what is published now.
+                message["result"] = {k: v for k, v in result.items() if self._entity_allowed(k)}
             elif kind == "get_panels" and isinstance(result, dict):
                 message["result"] = self._panels(result)
             elif kind == "lovelace/config" and isinstance(result, dict):
@@ -516,7 +570,19 @@ class MirrorSession:
         elif message.get("type") == "event" and kind == "logbook/event_stream":
             event = message.get("event")
             if isinstance(event, dict) and isinstance(event.get("events"), list):
-                event["events"] = [self._logbook_entry(e) for e in event["events"] if isinstance(e, dict)]
+                event["events"] = self._logbook_entries(event["events"])
+        elif message.get("type") == "event" and kind == "history/stream":
+            # A stream runs on after it was asked for. Each piece is held to
+            # what is published when it is sent: an entity that has since
+            # left a list that picks its own entities is left out from then.
+            event = message.get("event")
+            if isinstance(event, dict) and isinstance(event.get("states"), dict):
+                event["states"] = {k: v for k, v in event["states"].items() if self._entity_allowed(k)}
+        elif message.get("type") == "event" and msg_id in self._subjects:
+            if not self._entity_allowed(self._subjects[msg_id]):
+                self._subjects.pop(msg_id, None)
+                self._end_subscription(msg_id)
+                return None
         return message
 
     def _watched_template_event(self, msg_id: int, message: dict[str, Any]) -> dict[str, Any]:
@@ -599,6 +665,7 @@ class MirrorSession:
         ):
             self._watched.pop(subscription, None)
             self._conditions.discard(subscription)
+            self._subjects.pop(subscription, None)
 
     def _end_subscription(self, msg_id: int) -> None:
         """Stop a forwarded subscription from this side."""
@@ -614,6 +681,16 @@ class MirrorSession:
         if self._entities is None:
             return True
         return isinstance(entity_id, str) and entity_id in self._entities
+
+    def _logbook_entries(self, entries: list[Any]) -> list[dict[str, Any]]:
+        """Logbook lines of entities that are published now, each without
+        who or what caused it."""
+        return [
+            self._logbook_entry(entry)
+            for entry in entries
+            if isinstance(entry, dict)
+            and ("entity_id" not in entry or self._entity_allowed(entry.get("entity_id")))
+        ]
 
     @staticmethod
     def _logbook_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -823,6 +900,7 @@ class MirrorSession:
             if not self._entity_allowed(msg.get("entity_id")):
                 self._refuse(msg_id, kind, "(entity not on a published view)")
                 return
+            self._subjects[msg_id] = msg["entity_id"]
         elif kind == "config/entity_registry/get":
             if not self._entity_allowed(msg.get("entity_id")):
                 self._refuse(msg_id, kind, "(entity not on a published view)")
@@ -1017,6 +1095,7 @@ async def async_serve_websocket(
     notes: Any = None,
     panels: list[Panel] | None = None,
     access_now: Callable[[], Access] | None = None,
+    link: str | None = None,
 ) -> web.WebSocketResponse:
     """The public websocket endpoint."""
     global _connections  # noqa: PLW0603
@@ -1046,7 +1125,7 @@ async def async_serve_websocket(
         await ws.close()
         return ws
 
-    user, token = await async_get_viewer(hass)
+    user, token = await async_get_viewer(hass, link)
     session = MirrorSession(
         hass, ws, user, token, request.remote,
         public_path=public_path, dashboard=dashboard, access=access,

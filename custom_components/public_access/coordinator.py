@@ -145,13 +145,20 @@ class PublicDashboardCoordinator:
         return self.active and bool(self.options.get(CONF_ENABLED, True)) and not self.expired
 
     async def async_close_sockets(self) -> None:
-        """Hang up on everyone using this link."""
+        """Hang up on everyone using this link, and end every signed link
+        (to a picture, a clip) handed out for it: those are good only while
+        the link's token exists (mirror.async_get_viewer)."""
         for socket in list(self.sockets):
             try:
                 await socket.close()
             except Exception:  # noqa: BLE001 - already gone
                 pass
         self.sockets.clear()
+        hass = getattr(self, "hass", None)
+        if hass is not None:
+            from . import mirror
+
+            await mirror.async_forget_link_token(hass, self.entry.entry_id)
         if self.frigate_ui is not None and not self.active:
             await self.frigate_ui.async_close()
             self.frigate_ui = None
@@ -258,12 +265,12 @@ class PublicDashboardCoordinator:
         open. Nothing at all before the first time."""
         return self._access if self._access is not None else Access(camera_streams=False)
 
-    async def async_keep_current(self, _now: Any = None) -> None:
-        """While somebody is looking, keep what they may read up to date: at
-        once after a dashboard was edited, and every half minute. Without a
-        visitor there is nothing to keep; the next one's first request works
-        it out afresh."""
-        if getattr(self, "sockets", None) and getattr(self, "active", True):
+    async def async_keep_current(self, _now: Any = None, *, edited: bool = False) -> None:
+        """Keep what visitors may read up to date: at once after a dashboard
+        was edited (a signed link handed out earlier outlives the page it
+        was for, so this does not wait for a visitor), and every half minute
+        while somebody is looking."""
+        if (edited or getattr(self, "sockets", None)) and getattr(self, "active", True):
             try:
                 await self.async_access()
             except Exception:  # noqa: BLE001 - tried again in half a minute
@@ -286,13 +293,17 @@ class PublicDashboardCoordinator:
             paths=self.paths,
         )
         if not has_published_view(config, panel.views):
-            _LOGGER.warning(
+            # Said once per dashboard and selection, not at every refresh.
+            said = (panel.dashboard, tuple(panel.views), tuple(str(v.get("path")) for v in config.get("views") or [] if isinstance(v, dict)))
+            told = self.__dict__.setdefault("_warned_views", set())
+            (_LOGGER.debug if said in told else _LOGGER.warning)(
                 "None of the published views %s is in dashboard %r (views: %s); publishing nothing",
                 list(panel.views),
                 panel.dashboard,
                 ", ".join(str(v.get("path")) for v in config.get("views") or [] if isinstance(v, dict))
                 or "none",
             )
+            told.add(said)
             published["views"] = []
         return published
 
@@ -315,13 +326,13 @@ class PublicDashboardCoordinator:
                 self._access_at = 0.0
                 raise
             self._access = access
-            if before is not None and self._said != before and getattr(self, "sockets", None):
+            if before is not None and self._said != before:
                 # The dashboard, the energy settings or a shared card
                 # definition changed what this link publishes. Whoever has a
                 # page open is hung up on: the page connects again by itself
-                # and gets what is published now. Streams, signed requests
-                # and subscriptions started under the old rules end with the
-                # connection instead of running on.
+                # and gets what is published now. Streams and subscriptions
+                # started under the old rules end with the connection, and
+                # links signed under them stop working, instead of running on.
                 _LOGGER.debug("What /%s publishes has changed: reconnecting its visitors", self.public_path)
                 await self.async_close_sockets()
         return self._access

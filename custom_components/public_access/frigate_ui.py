@@ -60,7 +60,10 @@ from .const import (
 )
 from .policy import (
     clean_stream_info,
+    frigate_page_guard,
     frigate_socket_message,
+    frigate_ui_hidden_page,
+    frigate_ui_page_like,
     frigate_ui_path,
     public_frigate_config,
     public_frigate_stats,
@@ -297,6 +300,10 @@ async def async_serve(view: Any, request: web.Request, panel: Any, extra: str) -
         # A visitor has none: an empty list, so that it does not report an
         # error, and nothing is asked of Frigate.
         return web.json_response([], headers={"Cache-Control": "no-store"})
+    if frigate_ui_hidden_page(rest):
+        # Its settings, and the pages Frigate keeps for administrators: the
+        # live view instead.
+        raise web.HTTPFound(f"/{panel.path}/ui/")
     path = frigate_ui_path(rest)
     if path is None:
         coordinator.note_refusal(f"Frigate interface: not passed on for a visitor: {rest[:120]}")
@@ -321,10 +328,17 @@ async def async_serve(view: Any, request: web.Request, panel: Any, extra: str) -
     headers = {name: request.headers[name] for name in _ASK_HEADERS if name in request.headers}
     headers["X-Ingress-Path"] = base_path
     cleaner = _cleaner(path, cameras)
-    # What is cut down here is asked for plain; everything else in whatever
+    # Frigate's page itself gets something put into it (policy.frigate_page_guard),
+    # so it is asked for whole, never "not changed since".
+    page = frigate_ui_page_like(path)
+    if page:
+        headers.pop("If-None-Match", None)
+        headers.pop("If-Modified-Since", None)
+        headers.pop("Range", None)
+    # What is changed here is asked for plain; everything else in whatever
     # packing the visitor's browser accepts, and passed on as it comes.
     headers["Accept-Encoding"] = (
-        "identity" if cleaner is not None else request.headers.get("Accept-Encoding", "identity")
+        "identity" if cleaner is not None or page else request.headers.get("Accept-Encoding", "identity")
     )
     url = f"{ui.base}/{path}"
     if request.query_string:
@@ -363,6 +377,25 @@ async def async_serve(view: Any, request: web.Request, panel: Any, extra: str) -
                     "Cache-Control": "no-store",
                     "Content-Security-Policy": _CSP,
                     "X-Robots-Tag": "noindex, nofollow",
+                },
+            )
+        if page and upstream.headers.get("Content-Type", "").lower().startswith("text/html"):
+            if upstream.status != 200 or upstream.headers.get("Content-Encoding", "identity").lower() != "identity":
+                # Not a page that can be read here, so not one to hand on as it is.
+                return _not_found()
+            html = (await upstream.read()).decode("utf-8", "replace")
+            guard_html = frigate_page_guard(base_path)
+            at = html.lower().find("<head>")
+            html = html[: at + 6] + guard_html + html[at + 6 :] if at >= 0 else guard_html + html
+            return web.Response(
+                text=html,
+                content_type="text/html",
+                headers={
+                    "Cache-Control": "no-store",
+                    "Content-Security-Policy": _CSP,
+                    "Referrer-Policy": "no-referrer",
+                    "X-Robots-Tag": "noindex, nofollow",
+                    "Permissions-Policy": "microphone=(), camera=(), display-capture=()",
                 },
             )
         response = web.StreamResponse(status=upstream.status, headers=kept)

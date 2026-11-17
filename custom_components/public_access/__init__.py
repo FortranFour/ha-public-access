@@ -109,7 +109,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Re-sanitize after the owner edits the dashboard."""
         coordinator.invalidate()
         # Pages that are open are not left with what was published before.
-        hass.async_create_task(coordinator.async_keep_current(), eager_start=False)
+        hass.async_create_task(coordinator.async_keep_current(edited=True), eager_start=False)
 
     entry.async_on_unload(
         hass.bus.async_listen(EVENT_LOVELACE_UPDATED, _dashboard_changed)
@@ -180,6 +180,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """A link was deleted: take its notice away, and anything older versions left behind."""
     persistent_notification.async_dismiss(hass, f"{DOMAIN}_expired_{entry.entry_id}")
+    from . import mirror
+
+    await mirror.async_forget_link_token(hass, entry.entry_id)
     await _async_forget_license_files(hass)
 
 

@@ -48,7 +48,11 @@ def auto_entities_world(hass: HomeAssistant) -> Any:
             "hidden_by": entry.hidden_by.value if entry.hidden_by else None,
             "labels": list(entry.labels),
         }
-    for device in dr.async_get(hass).devices.values():
+    devices = dr.async_get(hass).devices
+    for device in devices:
+        if isinstance(device, str):
+            # Before Home Assistant 2026.11 this was a mapping of ids.
+            device = devices[device]
         world.devices[device.id] = {
             "id": device.id,
             "name": device.name,

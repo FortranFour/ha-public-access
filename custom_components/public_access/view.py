@@ -232,6 +232,7 @@ class PublicDashboardView(HomeAssistantView):
             dashboard=coordinator.dashboard,
             access=await coordinator.async_access(),
             access_now=coordinator.current_access,
+            link=coordinator.entry.entry_id,
             publish=coordinator.publish,
             title=coordinator.public_title,
             notes=coordinator,
@@ -260,7 +261,7 @@ class PublicDashboardView(HomeAssistantView):
         if access.stream_info_allowed(path):
             # Fetched here and passed on cleaned, never handed over as a link:
             # it names the camera's address on the home network.
-            _, token = await mirror.async_get_viewer(self.hass)
+            _, token = await mirror.async_get_viewer(self.hass, self._coordinator.entry.entry_id)
             signed = async_sign_path(
                 self.hass, path, timedelta(seconds=30), refresh_token_id=token.id
             )
@@ -274,7 +275,7 @@ class PublicDashboardView(HomeAssistantView):
         if access.llmvision_events_allowed(path):
             # Fetched here and passed on filtered: the timeline holds every
             # camera's events, and a visitor gets the published cameras'.
-            _, token = await mirror.async_get_viewer(self.hass)
+            _, token = await mirror.async_get_viewer(self.hass, self._coordinator.entry.entry_id)
             signed = async_sign_path(
                 self.hass, path, timedelta(seconds=30), refresh_token_id=token.id
             )
@@ -292,7 +293,7 @@ class PublicDashboardView(HomeAssistantView):
             response = self._json({"message": "Not found"}, status=404)
             response.headers["Cache-Control"] = "no-store"
             return response
-        _, token = await mirror.async_get_viewer(self.hass)
+        _, token = await mirror.async_get_viewer(self.hass, self._coordinator.entry.entry_id)
         signed = async_sign_path(
             self.hass, path, timedelta(seconds=60), refresh_token_id=token.id
         )
@@ -326,7 +327,7 @@ class PublicDashboardView(HomeAssistantView):
             return response
         upstream = None
         try:
-            _, token = await mirror.async_get_viewer(self.hass)
+            _, token = await mirror.async_get_viewer(self.hass, self._coordinator.entry.entry_id)
             signed = async_sign_path(
                 self.hass, path, timedelta(seconds=30), refresh_token_id=token.id
             )

@@ -178,7 +178,20 @@ def test_frigates_answers_are_passed_on_as_they_come():
     assert "auto_decompress=False" in text and '_PLAIN = {"Accept-Encoding": "identity"}' in text
     assert text.count("headers=_PLAIN") == 2, "signing in and the account check"
     serve = text[text.index("async def async_serve"):text.index("def _cleaner")]
-    assert '"identity" if cleaner is not None else request.headers.get("Accept-Encoding", "identity")' in serve
+    assert '"identity" if cleaner is not None or page else request.headers.get("Accept-Encoding", "identity")' in serve
+
+
+def test_frigates_page_is_never_handed_on_without_the_guard():
+    """Frigate's own page offers settings and an account menu. It reaches a
+    visitor with the guard in it (policy.frigate_page_guard) or not at all,
+    and is asked for whole, so a copy from before cannot be reused."""
+    text = (PACKAGE / "frigate_ui.py").read_text(encoding="utf-8")
+    serve = text[text.index("async def async_serve"):text.index("def _cleaner")]
+    assert serve.index("if frigate_ui_hidden_page(rest):") < serve.index("path = frigate_ui_path(rest)")
+    html = serve[serve.index('startswith("text/html")'):serve.index("response = web.StreamResponse(")]
+    assert "return _not_found()" in html and "frigate_page_guard(base_path)" in html and '"Cache-Control": "no-store"' in html
+    for header in ("If-None-Match", "If-Modified-Since"):
+        assert f'headers.pop("{header}", None)' in serve
 
 
 def test_an_id_is_checked_before_anything_is_noted_about_its_message():
