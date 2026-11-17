@@ -292,6 +292,11 @@ class PublicDashboardCoordinator:
             title=panel.title,
             paths=self.paths,
         )
+        if not config.get("views") and config.get("strategy"):
+            # A dashboard that builds itself in the browser (a strategy) has
+            # no views to choose from. It is sent as it is, and what it draws
+            # there is held to what the link publishes like everything else.
+            return published
         if not has_published_view(config, panel.views):
             # Said once per dashboard and selection, not at every refresh.
             said = (panel.dashboard, tuple(panel.views), tuple(str(v.get("path")) for v in config.get("views") or [] if isinstance(v, dict)))

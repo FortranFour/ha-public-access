@@ -56,6 +56,18 @@ def test_a_missing_view_publishes_nothing_not_the_first_one():
     assert _coordinator(views=["gone"]).publish(CONFIG)["views"] == []
 
 
+def test_a_dashboard_that_builds_itself_is_sent_as_it_is(caplog):
+    """A strategy dashboard has no views in its configuration; the browser
+    makes them. It reaches the visitor with its strategy, and nobody is told
+    that nothing is published."""
+    config = {"strategy": {"type": "custom:handbook", "pages": ["heating"]}}
+    published = _coordinator(views=["__first__"]).publish(config)
+    assert published["strategy"] == config["strategy"] and published["views"] == []
+    assert "publishing nothing" not in caplog.text
+    assert _coordinator(views=["__first__"]).publish({"title": "Empty"})["views"] == []
+    assert "publishing nothing" in caplog.text
+
+
 def test_supporting_views_alone_publish_nothing():
     """A supporting view only helps a published one; without one, nothing is sent."""
     assert _coordinator(views=["gone"], support_views=["overview"]).publish(CONFIG)["views"] == []
